@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ===== Team 5 project-specific =====
+# Raw datasets & large derived files — never commit
+data/*
+!data/.gitkeep
+!data/README.md
+*.csv
+*.parquet
+*.zip
+*.sqlite
+*.sqlite3
+
+# Trained models / artifacts
+*.pkl
+*.joblib
+*.h5
+
+# Streamlit secrets
+.streamlit/secrets.toml

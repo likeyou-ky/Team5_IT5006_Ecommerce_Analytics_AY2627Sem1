@@ -1,0 +1,8 @@
+# Olist-branded theme (from designsystem.olist.io tokens).
+# Locks a light, warm, on-brand look regardless of the viewer's system setting.
+[theme]
+primaryColor = "#0a4ee4"
+backgroundColor = "#fcfbf8"
+secondaryBackgroundColor = "#f2f0e8"
+textColor = "#10100f"
+font = "sans serif"

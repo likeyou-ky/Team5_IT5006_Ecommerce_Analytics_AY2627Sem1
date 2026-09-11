@@ -235,3 +235,9 @@ data/*
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Dashboard aggregates are small and committed on purpose (Streamlit Cloud reads them)
+!deployment/data/
+!deployment/data/*.csv
+!deployment/data/*.geojson
+!deployment/data/*.json

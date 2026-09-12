@@ -725,6 +725,12 @@ elif PAGE == PAGES[6]:
 elif PAGE == PAGES[7]:
     st.title("Problem selection — where the EDA lands")
     st.markdown("Each page narrowed the choice — **click a page name to jump to it**:")
+    # match the clickable page labels to the body/markdown font size of the other columns
+    st.markdown(
+        "<style>div[data-testid='stButton'] button[kind='tertiary'],"
+        "div[data-testid='stButton'] button[kind='tertiary'] p"
+        "{font-size:1rem;font-weight:400;line-height:1.4;text-align:left;padding-top:0;padding-bottom:0;}</style>",
+        unsafe_allow_html=True)
     NARROWED = [
         (PAGES[0], "freight & delivery both have derivable, well-spread targets", "two candidates on the table"),
         (PAGES[1], "~2 years, Black-Friday spike", "modelling ground rules, no winner yet"),

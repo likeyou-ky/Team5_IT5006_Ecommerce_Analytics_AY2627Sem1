@@ -401,6 +401,36 @@ def binned_mean(series_col, bins, labels, name):
     g["mean_review"] = g.mean_review.round(2)
     return g
 
+def binned_box(series_col, bins, labels, name):
+    """Per-bin box-plot statistics (Tukey whiskers, no outliers) — matches the notebook's boxplots."""
+    b = pd.cut(rel[series_col], bins=bins, labels=labels, right=False)
+    rows = []
+    for lab, grp in rel.groupby(b, observed=True):
+        s = grp.review_score.dropna()
+        if len(s) == 0:
+            continue
+        q1, med, q3 = s.quantile([.25, .5, .75])
+        iqr = q3 - q1
+        lo = float(s[s >= q1 - 1.5*iqr].min())
+        hi = float(s[s <= q3 + 1.5*iqr].max())
+        rows.append({name: lab, "q1": q1, "median": med, "q3": q3,
+                     "lowerfence": lo, "upperfence": hi, "n": int(len(s))})
+    return pd.DataFrame(rows)
+
+
+DRIVER_BINS = {
+    "delivery": ("delivery_days", [0, 5, 10, 15, 20, 30, rel.delivery_days.max()+1],
+                 ["0-5", "6-10", "11-15", "16-20", "21-30", ">30"], "delivery_bin"),
+    "days_late": ("days_late", [rel.days_late.min()-1, -10, -5, 0, 5, 10, 20, rel.days_late.max()+1],
+                  ["< -10", "-10 to -5", "-5 to 0", "0 to 5", "5 to 10", "10 to 20", "> 20"], "days_late_bin"),
+    "freight": ("freight_total", [0, 15, 25, 40, 60, rel.freight_total.max()+1],
+                ["0-15", "15-25", "25-40", "40-60", ">60"], "freight_bin"),
+    "freight_ratio": ("freight_ratio", [0, 0.1, 0.2, 0.3, 0.5, 1.0, rel.freight_ratio.max()+0.1],
+                      ["0-0.1", "0.1-0.2", "0.2-0.3", "0.3-0.5", "0.5-1.0", ">1.0"], "freight_ratio_bin"),
+}
+for key, (col, bins, labels, name) in DRIVER_BINS.items():
+    save(binned_box(col, bins, labels, name), f"review_box_{key}.csv")
+
 save(binned_mean("delivery_days", [0, 5, 10, 15, 20, 30, rel.delivery_days.max()+1],
                  ["0-5", "6-10", "11-15", "16-20", "21-30", ">30"], "delivery_bin"),
      "review_by_delivery.csv")

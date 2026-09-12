@@ -21,6 +21,7 @@ import plotly.io as pio
 
 st.set_page_config(page_title="Olist Consolidated EDA", page_icon="📦", layout="wide")
 DATA = os.path.join(os.path.dirname(__file__), "data")
+ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 
 
 @st.cache_data
@@ -92,7 +93,7 @@ st.sidebar.caption("Flow: data → temporal → delivery → geography → actor
 
 # ================================================================== 1. OVERVIEW & DATA QUALITY
 if PAGE == PAGES[0]:
-    st.title("Olist Brazilian E-Commerce — the data, and whether it is usable")
+    st.title("Olist Brazilian E-Commerce — Overview and Data Quality")
     st.markdown(
         "Nine relational tables centred on `orders`, spanning **%s → %s**. Before choosing a problem we "
         "read every chart for two things: **what it implies for our choice of problem**, and **whether the "
@@ -149,23 +150,12 @@ if PAGE == PAGES[0]:
 
     st.divider()
     # ---- the nine tables ----
-    st.subheader("The nine tables, their grain and their join keys")
-    c1, c2 = st.columns([3, 2], gap="large")
-    with c1:
-        ov = csv("overview.csv").rename(columns={
-            "total_missing_cells": "missing cells", "exact_dup_rows": "dup rows"})
-        st.dataframe(ov, width="stretch", hide_index=True)
-    with c2:
-        st.markdown(
-            "```\n"
-            "        customers ─┐ customer_id\n"
-            "  orders ──────────┴─ order_id ─ payments\n"
-            " (99,441)          │             reviews\n"
-            "                   │ order_id\n"
-            "            order_items ─ product_id ─ products ─ cat_translation\n"
-            " (112,650)         └──── seller_id  ─ sellers\n"
-            " geolocation ─ zip ─ customers / sellers\n"
-            "```")
+    st.subheader("Dataset Overview and Structure")
+    ov = csv("overview.csv").rename(columns={
+        "total_missing_cells": "missing cells", "exact_dup_rows": "dup rows"})
+    st.dataframe(ov, width="stretch", hide_index=True)
+    st.image(os.path.join(ASSETS, "ERD-final.png"),
+             caption="Database schema — the nine Olist tables and their relationships", width="stretch")
     st.markdown(
         f"**Grain matters.** `orders`, `customers`, `reviews` are one row per order; `order_items` is one "
         f"row per **item line** (up to **{F['max_items_in_order']}** per order); `payments` is one row per "
@@ -195,8 +185,10 @@ if PAGE == PAGES[0]:
             f"- **City-name columns split one city across spellings** — `sao paulo` appears **{F['city_plain']:,}** "
             f"times plainly and **{F['city_accented']:,}** more under accented/encoded spellings. **Do not join or "
             "group on city names** — key on `zip_code_prefix` and the lat/long centroids instead.")
-    with st.expander("Missing-data & outlier handling decisions (Phase-2 preprocessing rules)"):
-        st.markdown(
+    st.divider()
+    st.subheader("Missing-data & outlier handling decisions")
+    st.caption("Documented so Phase-2 preprocessing is reproducible.")
+    st.markdown(
             "| Issue | Extent | Decision |\n|---|---|---|\n"
             "| Review comment text mostly empty | ~59–88% | Drop text; use numeric `review_score`. |\n"
             "| Delivery timestamps missing | ~3% | Restrict delivery analysis to delivered orders; never use delivery dates as predictors. |\n"
@@ -443,8 +435,9 @@ elif PAGE == PAGES[4]:
             # counts. (A log-axis bar chart gives uneven widths and messy minor ticks.)
             fig = px.histogram(x=np.log10(si), nbins=40, title="Most sellers are tiny (log scale)")
             fig.update_traces(marker_color=ACCENT, marker_line_width=0)   # one solid blue
-            ticks = [1, 10, 100, 1000]                                    # decade ticks, matching the notebook
-            fig.update_xaxes(tickvals=[np.log10(v) for v in ticks], ticktext=[str(v) for v in ticks],
+            ticks = [1, 10, 100, 1000]                                    # decade ticks (10^n), matching the notebook
+            fig.update_xaxes(tickvals=[np.log10(v) for v in ticks],
+                             ticktext=["10⁰", "10¹", "10²", "10³"],
                              title_text="item lines sold")
             fig.update_yaxes(title_text="sellers")
             fig.add_vline(x=np.log10(F["seller_items_median"]), line_dash="dash", line_color=SLATE,
@@ -484,6 +477,7 @@ elif PAGE == PAGES[4]:
         spacer()
         st.markdown("**Weight explains only part of price** — freight follows the parcel, revenue follows price")
         wp = csv("weight_price_sample.csv").copy()
+        wp = wp[(wp.weight_kg > 0) & (wp.price > 0)]        # guard log10 against rounded-to-0 weights
         wp["log_w"] = np.log10(wp.weight_kg); wp["log_p"] = np.log10(wp.price)
         fig = px.density_heatmap(wp, x="log_w", y="log_p", nbinsx=45, nbinsy=45,
                                  color_continuous_scale="Greens", labels={"count": "item lines"})
@@ -677,20 +671,22 @@ elif PAGE == PAGES[6]:
     st.plotly_chart(H(fig, 460), width="stretch")
 
     spacer()
-    st.markdown("**Mean review score across bins of each driver** — pick a driver to compare.")
-    which = st.radio("Mean review score by", ["delivery days", "days late", "freight R$", "freight ratio"],
+    st.markdown("**Review-score distribution by bin (box plots)** — pick a driver; each box shows how the "
+                "*spread* of scores shifts across bins, as in the notebook.")
+    which = st.radio("Review score by", ["delivery days", "days late", "freight R$", "freight ratio"],
                      horizontal=True)
-    fmap = {"delivery days": ("review_by_delivery.csv", "delivery_bin", ACCENT),
-            "days late": ("review_by_days_late.csv", "days_late_bin", "#e64e36"),
-            "freight R$": ("review_by_freight.csv", "freight_bin", WARM),
-            "freight ratio": ("review_by_freight_ratio.csv", "freight_ratio_bin", GREEN)}
+    fmap = {"delivery days": ("review_box_delivery.csv", "delivery_bin", ACCENT),
+            "days late": ("review_box_days_late.csv", "days_late_bin", "#e64e36"),
+            "freight R$": ("review_box_freight.csv", "freight_bin", WARM),
+            "freight ratio": ("review_box_freight_ratio.csv", "freight_ratio_bin", GREEN)}
     fn, xcol, colr = fmap[which]
     rb = csv(fn)
-    fig = px.bar(rb, x=xcol, y="mean_review", color_discrete_sequence=[colr], text="mean_review",
-                 labels={"mean_review": "mean review score", xcol: which}, title=f"Mean review vs {which}")
-    fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-    fig.update_yaxes(range=[1, 5])
-    st.plotly_chart(H(fig, 400), width="stretch")
+    fig = go.Figure(go.Box(x=rb[xcol], q1=rb["q1"], median=rb["median"], q3=rb["q3"],
+                           lowerfence=rb["lowerfence"], upperfence=rb["upperfence"],
+                           fillcolor=colr, line=dict(color=SLATE, width=1), name=""))
+    fig.update_yaxes(range=[0.5, 5.5], dtick=1, title_text="review score")
+    fig.update_xaxes(title_text=which)
+    st.plotly_chart(H(fig, 400, title=f"Review score vs {which}", showlegend=False), width="stretch")
     st.success(f"Review score is far more correlated with **delivery** ({F['corr_review_delivery']:.2f}) than "
                f"**freight** ({F['corr_review_freight']:.2f}). It drops sharply as delivery slips late — roughly "
                f"**{F['review_ontime_star']}★ on-time vs {F['review_late_star']}★ late** — but is essentially "

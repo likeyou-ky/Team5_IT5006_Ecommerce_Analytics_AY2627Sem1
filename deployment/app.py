@@ -292,9 +292,9 @@ elif PAGE == PAGES[2]:
                     "delivery-time model is really predicting how long the courier takes to reach the customer.")
 
     st.divider()
-    st.markdown("#### The state gradient — delivery time and lateness are **not** the same map")
-    st.caption("Each bar is one **customer state**: how long its orders take, and how often they miss Olist's "
-               "estimate. Rank the states by either metric to see they disagree.")
+    st.markdown("#### Delivery Performance Across Customer States")
+    st.caption("Compare customer states by median delivery time and late-delivery rate to identify "
+               "differences in delivery performance.")
     s = csv("state_summary.csv")
     sort_by = st.radio("Rank customer states by", ["median_delivery_days", "late_rate"], horizontal=True,
                        format_func=lambda x: {"median_delivery_days": "Median delivery time (days)",

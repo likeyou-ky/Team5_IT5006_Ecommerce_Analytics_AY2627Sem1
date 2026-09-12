@@ -478,13 +478,19 @@ elif PAGE == PAGES[4]:
         st.markdown("**Weight explains only part of price** — freight follows the parcel, revenue follows price")
         wp = csv("weight_price_sample.csv").copy()
         wp = wp[(wp.weight_kg > 0) & (wp.price > 0)]        # guard log10 against rounded-to-0 weights
-        wp["log_w"] = np.log10(wp.weight_kg); wp["log_p"] = np.log10(wp.price)
-        fig = px.density_heatmap(wp, x="log_w", y="log_p", nbinsx=45, nbinsy=45,
-                                 color_continuous_scale="Greens", labels={"count": "item lines"})
-        ticks = [0.1, 1, 10, 100]
-        fig.update_xaxes(tickvals=[np.log10(v) for v in ticks], ticktext=[str(v) for v in ticks],
+        lw = np.log10(wp.weight_kg.to_numpy()); lp = np.log10(wp.price.to_numpy())
+        H2, xe, ye = np.histogram2d(lw, lp, bins=45)
+        z = np.where(H2.T > 0, H2.T, np.nan)               # blank empty cells (white)
+        zlog = np.log10(z)                                 # log color scale — density spread (notebook used bins='log')
+        cmax = int(np.ceil(np.nanmax(zlog)))
+        fig = go.Figure(go.Heatmap(
+            x=(xe[:-1] + xe[1:]) / 2, y=(ye[:-1] + ye[1:]) / 2, z=zlog, colorscale="Greens",
+            colorbar=dict(title="item lines", tickvals=list(range(0, cmax + 1)),
+                          ticktext=[str(10 ** t) for t in range(0, cmax + 1)])))
+        xt = [0.1, 1, 10, 100]; yt = [10, 100, 1000]
+        fig.update_xaxes(tickvals=[np.log10(v) for v in xt], ticktext=[str(v) for v in xt],
                          title_text="product weight (kg, log scale)")
-        fig.update_yaxes(tickvals=[np.log10(v) for v in [10, 100, 1000]], ticktext=["10", "100", "1000"],
+        fig.update_yaxes(tickvals=[np.log10(v) for v in yt], ticktext=[str(v) for v in yt],
                          title_text="item price (R$, log scale)")
         st.plotly_chart(H(fig, 420), width="stretch")
         st.info(f"Volume is concentrated — top 10 of {F['n_categories']} categories carry **{F['top10_vol_pct']}%** "

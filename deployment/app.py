@@ -83,7 +83,16 @@ PAGES = [
     "7 · Reviews & satisfaction",
     "8 · Problem selection",
 ]
-PAGE = st.sidebar.radio("Follow the EDA story", PAGES)
+if "nav" not in st.session_state:
+    st.session_state["nav"] = PAGES[0]
+
+
+def go_to(page):
+    """Jump to a page by setting the sidebar radio (used by the Section 8 table links)."""
+    st.session_state["nav"] = page
+
+
+PAGE = st.sidebar.radio("Follow the EDA story", PAGES, key="nav")
 st.sidebar.markdown("---")
 st.sidebar.caption(
     f"{F['date_min']} → {F['date_max']} · {F['n_orders']:,} orders · {F['n_items']:,} item lines · "
@@ -715,16 +724,25 @@ elif PAGE == PAGES[6]:
 # ================================================================== 8. PROBLEM SELECTION
 elif PAGE == PAGES[7]:
     st.title("Problem selection — where the EDA lands")
-    st.markdown("Each page narrowed the choice (page numbers match the sidebar):")
-    st.markdown(
-        "| Page | What it showed | Effect on selection |\n|---|---|---|\n"
-        "| 1 · Overview | freight & delivery both have derivable, well-spread targets | two candidates on the table |\n"
-        "| 2 · Temporal | ~2 years, Black-Friday spike | modelling ground rules, no winner yet |\n"
-        "| 3 · Delivery | strong state gradient; longest-transit ≠ highest-late | delivery is a real, distance-driven target |\n"
-        "| 4 · Geography | distance drives freight & delivery | freight is computable from parcel + route |\n"
-        "| 5 · Actors | repeat 3%, sellers too thin; freight burden regressive | rules out customer/seller targets |\n"
-        "| 6 · Freight | tracks weight/volume/distance; regressive; residual spread | freight is **predictable and matters** |\n"
-        "| 7 · Reviews | text mostly empty; score tracks delivery, not freight | satisfaction ≠ freight; keep freight a cost problem |")
+    st.markdown("Each page narrowed the choice — **click a page name to jump to it**:")
+    NARROWED = [
+        (PAGES[0], "freight & delivery both have derivable, well-spread targets", "two candidates on the table"),
+        (PAGES[1], "~2 years, Black-Friday spike", "modelling ground rules, no winner yet"),
+        (PAGES[2], "strong state gradient; longest-transit ≠ highest-late", "delivery is a real, distance-driven target"),
+        (PAGES[3], "distance drives freight & delivery", "freight is computable from parcel + route"),
+        (PAGES[4], "repeat 3%, sellers too thin; freight ratio regressive", "rules out customer/seller targets"),
+        (PAGES[5], "tracks weight/volume/distance; regressive; residual spread", "freight is **predictable and matters**"),
+        (PAGES[6], "text mostly empty; score tracks delivery, not freight", "satisfaction ≠ freight; keep freight a cost problem"),
+    ]
+    WIDTHS = [3.4, 3.3, 3.3]
+    hdr = st.columns(WIDTHS)
+    hdr[0].markdown("**Page**"); hdr[1].markdown("**What it showed**"); hdr[2].markdown("**Effect on selection**")
+    for i, (label, showed, effect) in enumerate(NARROWED):
+        row = st.columns(WIDTHS, vertical_alignment="center")
+        row[0].button(label, key=f"jump_{i}", on_click=go_to, args=(label,),
+                      type="tertiary", width="stretch")
+        row[1].markdown(showed)
+        row[2].markdown(effect)
 
     st.divider()
     a, b = st.columns(2, gap="large")

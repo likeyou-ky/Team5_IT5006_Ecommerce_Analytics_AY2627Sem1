@@ -154,15 +154,18 @@ if PAGE == PAGES[0]:
     ov = csv("overview.csv").rename(columns={
         "total_missing_cells": "missing cells", "exact_dup_rows": "dup rows"})
     st.dataframe(ov, width="stretch", hide_index=True)
-    st.image(os.path.join(ASSETS, "ERD-final.png"),
-             caption="Database schema — the nine Olist tables and their relationships", width="stretch")
+    erd_col, _ = st.columns([3, 2])                    # ~60% width (ERD reduced ~40%, per review)
+    with erd_col:
+        st.image(os.path.join(ASSETS, "ERD-final.png"),
+                 caption="Database schema — the nine Olist tables and their relationships", width="stretch")
     st.markdown(
-        f"**Grain matters.** `orders`, `customers`, `reviews` are one row per order; `order_items` is one "
-        f"row per **item line** (up to **{F['max_items_in_order']}** per order); `payments` is one row per "
-        f"instalment record. `customer_id` is issued **per order** — the real person is `customer_unique_id` "
-        f"({F['n_customer_rows']:,} ids collapse to **{F['n_customer_unique']:,}** people). `geolocation` has "
-        f"{F['n_geo_rows']:,} rows across {F['n_geo_zip']:,} zip prefixes, so it must be reduced to one "
-        "coordinate per zip before use (median lat/long per zip, on the Geography page).")
+        "**Data structure**\n\n"
+        "- `orders` and `reviews` are one row per order\n"
+        "- `customers` is one row per `customer_id`; each `customer_unique_id` can have several entries\n"
+        "- `order_items` is one row per item line, and an order can have several entries distinguished by "
+        "`order_item_id`\n"
+        "- `payments` is one row per payment instalment record, and an order can have multiple entries "
+        "distinguished by `payment_installments`")
 
     st.divider()
     # ---- data quality ----
@@ -693,11 +696,20 @@ elif PAGE == PAGES[6]:
     fig.update_yaxes(range=[0.5, 5.5], dtick=1, title_text="review score")
     fig.update_xaxes(title_text=which)
     st.plotly_chart(H(fig, 400, title=f"Review score vs {which}", showlegend=False), width="stretch")
-    st.success(f"Review score is far more correlated with **delivery** ({F['corr_review_delivery']:.2f}) than "
-               f"**freight** ({F['corr_review_freight']:.2f}). It drops sharply as delivery slips late — roughly "
-               f"**{F['review_ontime_star']}★ on-time vs {F['review_late_star']}★ late** — but is essentially "
-               "**flat across freight burden**. Satisfaction belongs to a **delivery** problem; that keeps our "
-               "scope honest and frames freight as a **cost / pricing** problem, not a customer-happiness one.")
+    st.success(
+        "Across the four drivers, review score tracks **delivery timing, not freight**:\n\n"
+        "- **Delivery days** (corr −0.33): the median stays at 5★ up to ~20 days, slips to 4★ at 21–30 days, "
+        "and collapses to 1★ beyond 30 days.\n"
+        "- **Days late** (corr −0.27): the median holds at 5★ while orders arrive early, drops to 4★ once "
+        "0–5 days late, and to 1★ once more than 5 days late.\n"
+        "- **Freight R$** (corr −0.09): the median stays 5★ across every freight band — only the lower "
+        "quartile dips slightly for the most expensive shipments.\n"
+        "- **Freight ratio** (corr −0.02): essentially flat — median 5★ with unchanged quartiles even where "
+        "freight exceeds the item's own price.\n\n"
+        "**Conclusion:** satisfaction is governed by **how fast and how on-time** delivery is, and is "
+        "effectively **indifferent to what shipping costs** — whether in reais (freight R$) or relative to "
+        "price (freight ratio). That makes delivery the satisfaction lever and keeps freight scoped as a "
+        "**cost / pricing** problem, not a customer-happiness one.")
 
 
 # ================================================================== 8. PROBLEM SELECTION

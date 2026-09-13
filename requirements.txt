@@ -9,6 +9,7 @@ scipy>=1.10
 # --- visualisation ---
 matplotlib>=3.7
 seaborn>=0.12
+plotly>=5.18          # interactive charts in the Streamlit dashboard
 
 # --- modelling ---
 scikit-learn>=1.3

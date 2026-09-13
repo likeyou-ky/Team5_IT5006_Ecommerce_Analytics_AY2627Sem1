@@ -2,7 +2,7 @@
 
 Interactive Streamlit dashboard for the consolidated EDA.
 
-It is an interactive retelling of `notebooks/00_Consolidated_EDA_final.ipynb` — the eight pages follow
+It is an interactive retelling of `notebooks/Team5_Phase1_IT5006_AY2627Sem1.ipynb` — the eight pages follow
 that notebook's sections in order, and every headline number is read from `data/facts.json`, which the
 generator produces straight from the notebook's own logic (with `assert`s that fail if any number
 drifts). EDA only — **no prediction model**.

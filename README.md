@@ -8,7 +8,7 @@ fair freight value from a parcel's weight, size and shipping distance) and a cla
 
 **Repository:** https://github.com/likeyou-ky/Team5_IT5006_Ecommerce_Analytics_AY2627Sem1
 
-**Live dashboard:** https://team5-olist-eda.streamlit.app/
+**Live dashboard:** https://team5-olist-eda-phase1.streamlit.app/
 
 ## Repository structure
 
@@ -67,7 +67,7 @@ the data accordingly.
 An interactive Streamlit dashboard retells the consolidated EDA, section by section, and is
 deployed publicly:
 
-**https://team5-olist-eda.streamlit.app/**
+**https://team5-olist-eda-phase1.streamlit.app/**
 
 It reads only the small precomputed aggregates in `deployment/data/` (not the 121 MB raw dataset),
 so it deploys on Streamlit Cloud with nothing extra to host. To run it locally:

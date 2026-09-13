@@ -8,8 +8,8 @@ publicly on Streamlit Cloud.
 
 ## 0. Hard rules (read first)
 
-1. **Single source of truth:** `notebooks/00_Consolidated_EDA_final.ipynb`
-   (`C:\Users\KLi\Team5_IT5006_Ecommerce_Analytics_AY2627Sem1\notebooks\00_Consolidated_EDA_final.ipynb`).
+1. **Single source of truth:** `notebooks/Team5_Phase1_IT5006_AY2627Sem1.ipynb`
+   (`C:\Users\KLi\Team5_IT5006_Ecommerce_Analytics_AY2627Sem1\notebooks\Team5_Phase1_IT5006_AY2627Sem1.ipynb`).
    The dashboard mirrors that notebook's sections, story, and numbers.
 2. **Do NOT invent or recompute statistics.** Every number shown in the dashboard must already appear
    in the notebook (a cell output or markdown). If a number isn't in the notebook, don't put it in the

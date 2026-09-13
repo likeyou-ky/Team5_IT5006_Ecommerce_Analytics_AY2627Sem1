@@ -5,7 +5,7 @@ Precompute small aggregate files for the Streamlit dashboard.
 This regenerates the lightweight files in ``deployment/data/`` that the deployed app reads, so the
 app runs on Streamlit Cloud without shipping the 121 MB raw dataset.
 
-Everything here mirrors ``notebooks/00_Consolidated_EDA_final.ipynb`` cell-for-cell: the ``item`` and
+Everything here mirrors ``notebooks/Team5_Phase1_IT5006_AY2627Sem1.ipynb`` cell-for-cell: the ``item`` and
 ``order`` analytical tables are built with the notebook's exact logic (§3), and every aggregate below
 is the same groupby the notebook charts from. The headline numbers are also written verbatim to
 ``facts.json`` and a block of ``assert``s at the end fails loudly if a recomputed number ever drifts
@@ -520,7 +520,7 @@ json.dump(facts, open(os.path.join(OUT, "facts.json"), "w"), indent=2)
 print("wrote facts.json")
 
 # ============================ ASSERTIONS: recomputed == notebook ============================
-# If any of these fail, an aggregate has drifted from 00_Consolidated_EDA_final.ipynb.
+# If any of these fail, an aggregate has drifted from Team5_Phase1_IT5006_AY2627Sem1.ipynb.
 NB = {  # transcribed from the final notebook's cell outputs
     "n_orders": 99441, "n_items": 112650, "n_customer_unique": 96096, "n_sellers": 3095,
     "orders_in_items": 98666, "max_items_in_order": 21, "date_max": "2018-10-17",

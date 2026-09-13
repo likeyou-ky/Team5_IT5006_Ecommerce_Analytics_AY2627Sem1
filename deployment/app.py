@@ -2,7 +2,7 @@
 """
 Olist Brazilian E-Commerce — Consolidated EDA dashboard (Team 5, IT5006).
 
-An interactive retelling of ``notebooks/00_Consolidated_EDA_final.ipynb``. The eight pages follow the
+An interactive retelling of ``notebooks/Team5_Phase1_IT5006_AY2627Sem1.ipynb``. The eight pages follow the
 notebook's flow in order — dataset & data quality, temporal, delivery, geography, the customer /
 seller / product distributions, freight economics (the spine), reviews, and the problem selection —
 and every headline number is read from ``data/facts.json``, which is generated straight from the
@@ -804,4 +804,4 @@ elif PAGE == PAGES[7]:
             "partial final month.")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Source: notebooks/00_Consolidated_EDA_final.ipynb · Team 5")
+st.sidebar.caption("Source: notebooks/Team5_Phase1_IT5006_AY2627Sem1.ipynb · Team 5")

@@ -1,0 +1,4 @@
+stage,avg_days
+purchase->approval,0.43
+approval->carrier,2.8
+carrier->customer,9.33

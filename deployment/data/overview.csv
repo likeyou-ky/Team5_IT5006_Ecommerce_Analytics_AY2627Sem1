@@ -1,0 +1,10 @@
+table,rows,cols,total_missing_cells,exact_dup_rows
+orders,99441,8,4908,0
+items,112650,7,0,0
+payments,103886,5,0,0
+reviews,99224,7,145903,0
+customers,99441,5,0,0
+sellers,3095,4,0,0
+products,32951,9,2448,0
+geolocation,1000163,5,0,261831
+cat_trans,71,2,0,0

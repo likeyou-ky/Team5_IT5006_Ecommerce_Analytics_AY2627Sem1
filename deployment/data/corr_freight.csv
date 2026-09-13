@@ -1,0 +1,7 @@
+var,price,freight_value,freight_ratio,weight_kg,volumetric_weight_kg,distance_km
+price,1.0,0.41,-0.29,0.34,0.3,0.08
+freight_value,0.41,1.0,0.09,0.61,0.59,0.39
+freight_ratio,-0.29,0.09,1.0,-0.1,-0.09,0.17
+weight_kg,0.34,0.61,-0.1,1.0,0.8,-0.01
+volumetric_weight_kg,0.3,0.59,-0.09,0.8,1.0,-0.01
+distance_km,0.08,0.39,0.17,-0.01,-0.01,1.0

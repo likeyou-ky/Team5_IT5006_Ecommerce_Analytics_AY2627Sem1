@@ -1,0 +1,14 @@
+table,column,missing_rows,missing_pct
+orders,order_approved_at,160,0.16
+orders,order_delivered_carrier_date,1783,1.79
+orders,order_delivered_customer_date,2965,2.98
+reviews,review_comment_title,87656,88.34
+reviews,review_comment_message,58247,58.7
+products,product_category_name,610,1.85
+products,product_name_lenght,610,1.85
+products,product_description_lenght,610,1.85
+products,product_photos_qty,610,1.85
+products,product_weight_g,2,0.01
+products,product_length_cm,2,0.01
+products,product_height_cm,2,0.01
+products,product_width_cm,2,0.01

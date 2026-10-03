@@ -1,5 +1,7 @@
 # IT5006 Team 5 — Python dependencies
 # Install with:  pip install -r requirements.txt
+# Minimum versions below; Phase 2 results were produced with Python 3.14.3, pandas 2.3.3,
+# numpy 2.4.2 and scikit-learn 1.8.0.
 
 # --- core data stack ---
 pandas>=2.0
@@ -12,7 +14,7 @@ seaborn>=0.12
 plotly>=5.18          # interactive charts in the Streamlit dashboard
 
 # --- modelling ---
-scikit-learn>=1.3
+scikit-learn>=1.4          # make_scorer(response_method=...), TargetEncoder
 
 # --- notebooks ---
 jupyter>=1.0
@@ -23,3 +25,4 @@ streamlit>=1.30
 
 # --- utilities ---
 joblib>=1.3
+

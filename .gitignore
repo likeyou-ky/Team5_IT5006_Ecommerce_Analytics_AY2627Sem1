@@ -241,3 +241,8 @@ data/*
 !deployment/data/*.csv
 !deployment/data/*.geojson
 !deployment/data/*.json
+
+# Reports, summaries and generated outputs in docs/ are kept local (not shared on GitHub), as is the
+# report builder; run the notebook or scripts/run_phase2.py to regenerate docs/phase2/tables and figures
+docs/
+scripts/build_report.py

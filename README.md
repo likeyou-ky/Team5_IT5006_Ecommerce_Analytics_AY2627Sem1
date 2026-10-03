@@ -1,10 +1,8 @@
 # Team 5 — IT5006 E-Commerce Analytics (AY2026/27 Semester 1)
 
-This repository holds our coursework for the IT5006 project. We work with the Olist Brazilian
-E-Commerce dataset and study the economics of shipping: what determines the freight charged on an
-order, and how well that cost can be predicted. We frame this as a regression task (estimating a
-fair freight value from a parcel's weight, size and shipping distance) and a classification task
-(flagging orders whose freight is abnormally high relative to that prediction).
+This repository holds our coursework for the IT5006 project. We work with the Olist Brazilian E-Commerce dataset and study the logistics of an order with two problems:
+a **regression** task (what freight *should* an item be charged, from weight, size, distance and category) and a
+**classification** task (will a delivered order arrive later than its promised date, `is_late`, a 6.8% minority class).
 
 **Repository:** https://github.com/likeyou-ky/Team5_IT5006_Ecommerce_Analytics_AY2627Sem1
 
@@ -17,10 +15,12 @@ project-root/
 ├── data/            raw Olist CSVs (not committed; see data/README.md)
 ├── notebooks/
 │   ├── Team5_Phase1_IT5006_AY2627Sem1.ipynb   consolidated EDA — the Phase 1 deliverable
+│   ├── Team5_Phase2_IT5006_AY2627Sem1.ipynb   modelling and evaluation — the Phase 2 deliverable
 │   └── draft/individual/                       each member's working notebooks
-├── src/             reusable Python modules (e.g. olist_theme.py plotting theme)
+├── src/             reusable modules: features.py, models.py, pipeline.py, plots.py, olist_theme.py
+├── scripts/         run_phase2.py — headless reproduction of every Phase 2 table and figure
 ├── deployment/      Streamlit dashboard (app.py, gen_dashboard_data.py, data/ aggregates)
-├── docs/            reports, EDA summaries and figures
+├── docs/            local only, not versioned: reports, EDA summaries, Phase 2 tables and figures
 ├── requirements.txt
 └── README.md
 ```
@@ -61,6 +61,32 @@ To run on Google Colab, place the CSVs in Google Drive under
 run the rest. To run locally, put the CSVs in `data/` (see `data/README.md`), install the
 requirements above, and launch `jupyter notebook`. The notebook detects Colab vs local and reads
 the data accordingly.
+
+## Phase 2 — modelling
+
+`notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb` is the Phase 2 deliverable. Two problems:
+
+| | Problem 1 — regression | Problem 2 — classification |
+|---|---|---|
+| Question | fair freight for an order item | will the order arrive after its promised date? |
+| Target | `log1p(freight_value)` (112,650 items) | `is_late` (96,476 delivered orders, 6.8% late) |
+| Stakeholder | logistics-pricing / finance analyst | operations and customer-experience team |
+| Validation | 80/20 hold-out grouped by `order_id`; robustness splits by product and by time | time-ordered: latest 20% of orders as test, 30-day embargo, 5-fold forward-chaining CV |
+
+Three model families across both problems: Linear (LinearRegression/Ridge, Logistic), Tree-based (DecisionTree
+baseline, RandomForest) and Ensemble (Stacking for Problem 1, soft Voting for Problem 2). All preprocessing sits inside
+scikit-learn Pipelines; the seed is `RANDOM_STATE = 42`. Problem 2 features use only information available at
+checkout, including delivery history from orders delivered before the purchase; its operating rule is a daily
+review budget (the riskiest 10% of each day's orders).
+
+```bash
+export OLIST_DATA_DIR=/path/to/Olist_CSV          # or place the CSVs in data/
+python scripts/run_phase2.py                      # full run, about 20 minutes on 12 cores
+PHASE2_FAST=1 python scripts/run_phase2.py        # smoke test on a sample
+```
+
+The notebook and `scripts/run_phase2.py` call the same functions in `src/` and write the same tables to
+`docs/phase2/tables/` and figures to `docs/phase2/figures/` (generated locally, not versioned).
 
 ## Dashboard
 

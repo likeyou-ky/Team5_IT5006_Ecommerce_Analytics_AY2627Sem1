@@ -76,8 +76,8 @@ def scoping_checklist(orders):
          "freight_value comes from order_items.", "is_late = delivered date vs estimated date from orders (Phase 1 definition)."],
         ["2. All predictors exist before the outcome (no leakage)",
          "Listing, address and basket fields fixed at checkout.",
-         "Checkout-time fields, including the promised date, and history from orders delivered before the purchase; "
-         "delivery, carrier, approval and review fields excluded."],
+         "Checkout-time fields only, including the promised date; delivery, carrier, approval and review fields "
+         "excluded."],
         ["3. EDA shows feature-target relationships",
          "Phase 1: freight correlates 0.61 / 0.59 / 0.39 with weight / volume / distance.",
          "Phase 1: strong state gradient (SP 4.5% late vs AL 21.4%); late rate varies 1-19% by month."],
@@ -198,7 +198,7 @@ def cv_regression(models, train, fs, k=5):
             folds.append(M.reg_metrics(y.iloc[va], mm.predict(X.iloc[va])))
         f = pd.DataFrame(folds)
         rows.append({"Model": name, **{f"{c} mean": f[c].mean() for c in ["MAE_rs", "RMSE_rs", "R2_rs", "R2_log"]},
-                     **{f"{c} sd": f[c].std() for c in ["MAE_rs", "R2_rs"]}})
+                     **{f"{c} sd": f[c].std() for c in ["MAE_rs", "RMSE_rs", "R2_rs"]}})
     return pd.DataFrame(rows)
 
 
@@ -426,8 +426,13 @@ def missed_late_orders(test, flags):
 
 # ------------------------------------------------------------------ ablation (feature breadth)
 def ablation_regression(train, n_rows=40000, k=3):
+    """Grouped CV of every nested Problem 1 feature set with a fixed forest, on an order-grouped sub-sample.
+
+    As for Problem 2, each added group is judged by its PAIRED gain in MAE over the previous set, fold by fold
+    (gain > 0 = lower MAE), with the sd of that gain across folds.
+    """
     sub = subsample(train, n_rows)
-    rows = []
+    rows, prev = [], None
     for name, fs in F.FEATURE_SETS.items():
         X = sub[cols_for(fs)]
         m = M.reg_estimators(fs, dict(n_estimators=100, min_samples_leaf=5, max_features=0.5))["Tree: RandomForest"]
@@ -435,45 +440,59 @@ def ablation_regression(train, n_rows=40000, k=3):
         for tr, va in M.OrderGroupCV(k).split(X):
             mm = clone(m).fit(X.iloc[tr], sub.reg_target.iloc[tr])
             r.append(M.reg_metrics(sub.reg_target.iloc[va], mm.predict(X.iloc[va])))
-        rows.append({"Feature set": name, "MAE (R$)": np.mean([a["MAE_rs"] for a in r]),
-                     "RMSE (R$)": np.mean([a["RMSE_rs"] for a in r]), "R2 (R$)": np.mean([a["R2_rs"] for a in r])})
+        mae = np.array([a["MAE_rs"] for a in r])
+        rows.append({"Feature set": name, "MAE (R$)": mae.mean(), "RMSE (R$)": np.mean([a["RMSE_rs"] for a in r]),
+                     "R2 (R$)": np.mean([a["R2_rs"] for a in r]),
+                     "Gain (R$)": np.nan if prev is None else (prev - mae).mean(),
+                     "Gain sd": np.nan if prev is None else (prev - mae).std(ddof=1)})
+        prev = mae
     return pd.DataFrame(rows)
 
 
-def ablation_classification(train, k=5):
-    """Forward-chaining CV of every nested feature set, with both base families.
+def merge_sets(a, b):
+    """Union of two feature-set specs {num, cat, te}, keeping order."""
+    return {k: list(dict.fromkeys(a[k] + b[k])) for k in ("num", "cat", "te")}
 
-    A fixed L2 logistic model (C = 0.1) and a fixed, regularised class-weighted forest are used, so the
-    feature choice does not depend on tuning. Score = mean PR-AUC lift over the fold late rate.
-    Because the folds differ a lot in difficulty, each added group is judged by its PAIRED gain over the
-    previous set, fold by fold ("Check" rows are compared with the set they extend).
+
+def ablation_classification(train, k=5):
+    """Forward selection of the Problem 2 feature groups on forward-chaining CV, with both base families.
+
+    Start from the promise alone (F.LATE_BASE) and add each group of F.LATE_GROUPS, in order, to the set kept so far.
+    Because the folds differ a lot in difficulty, a group is judged by its PAIRED gain in PR-AUC lift over the kept
+    set, fold by fold, and kept only if that gain exceeds its fold sd for at least one family. A fixed L2 logistic
+    model (C = 0.1) and a fixed, regularised class-weighted forest are used, so the choice does not depend on tuning.
+    Returns the table and the selected feature set.
     """
-    folds = list(M.TimeForwardCV(k).split(train))
-    rows, per_fold = [], {}
-    for name, fs in F.LATE_FEATURE_SETS.items():
-        X, y = train[cols_for(fs)], train.clf_target
+    folds, y = list(M.TimeForwardCV(k).split(train)), train.clf_target
+
+    def score(fs):
+        X = train[cols_for(fs)]
         est = M.clf_estimators(fs, dict(n_estimators=100, min_samples_leaf=50, max_features=0.3, max_depth=10,
                                         class_weight="balanced"), logit_c=0.1)
-        res = {"Feature set": name}
+        out = {}
         for lbl, key in [("Logit", "Linear: Logistic (L2)"), ("RF", "Tree: RandomForest")]:
-            lift, roc = [], []
-            for tr, va in folds:
-                s = M.clf_scores(clone(est[key]).fit(X.iloc[tr], y.iloc[tr]), X.iloc[va])
-                lift.append(M.pr_lift(y.iloc[va], s)); roc.append(roc_auc_score(y.iloc[va], s))
-            per_fold[(name, lbl)] = np.array(lift)
-            res[f"{lbl} lift"], res[f"{lbl} ROC-AUC"] = np.mean(lift), np.mean(roc)
-        rows.append(res)
-    names = list(F.LATE_FEATURE_SETS)
-    for i, r in enumerate(rows):
-        base = None if i == 0 else (F.LATE_FULL_SET if r["Feature set"].startswith("Check") else names[i - 1])
-        for lbl in ["Logit", "RF"]:
-            if base is None:
-                r[f"{lbl} gain"], r[f"{lbl} gain sd"] = np.nan, np.nan
-                continue
-            d = per_fold[(r["Feature set"], lbl)] - per_fold[(base, lbl)]
-            r[f"{lbl} gain"], r[f"{lbl} gain sd"] = d.mean(), d.std(ddof=1)
-    cols = ["Feature set"] + [f"{l} {c}" for l in ["Logit", "RF"] for c in ["lift", "gain", "gain sd", "ROC-AUC"]]
-    return pd.DataFrame(rows)[cols]
+            s = [M.clf_scores(clone(est[key]).fit(X.iloc[tr], y.iloc[tr]), X.iloc[va]) for tr, va in folds]
+            out[lbl] = (np.array([M.pr_lift(y.iloc[va], si) for (_, va), si in zip(folds, s)]),
+                        np.mean([roc_auc_score(y.iloc[va], si) for (_, va), si in zip(folds, s)]))
+        return out
+
+    kept, best = F.LATE_BASE, score(F.LATE_BASE)
+    rows = [{"Feature set": "Promise only (start)", "Kept": "start",
+             **{f"{l} {c}": v for l in best for c, v in [("lift", best[l][0].mean()), ("ROC-AUC", best[l][1])]}}]
+    for name, group in F.LATE_GROUPS.items():
+        cand = merge_sets(kept, group)
+        sc = score(cand)
+        r = {"Feature set": f"+ {name}"}
+        for l in sc:
+            d = sc[l][0] - best[l][0]
+            r.update({f"{l} lift": sc[l][0].mean(), f"{l} gain": d.mean(), f"{l} gain sd": d.std(ddof=1),
+                      f"{l} ROC-AUC": sc[l][1]})
+        r["Kept"] = "yes" if any(r[f"{l} gain"] > r[f"{l} gain sd"] for l in sc) else "no"
+        if r["Kept"] == "yes":
+            kept, best = cand, sc
+        rows.append(r)
+    cols = ["Feature set"] + [f"{l} {c}" for l in ["Logit", "RF"] for c in ["lift", "gain", "gain sd", "ROC-AUC"]] + ["Kept"]
+    return pd.DataFrame(rows)[cols], kept
 
 
 # ------------------------------------------------------------------ interpretability
@@ -561,9 +580,15 @@ def audit_summary(flagged):
 
 
 def audit_review_sheet(flagged, n=30):
-    """Top-n flagged items with the context a reviewer needs (for manual precision-at-k checks)."""
-    f = flagged[flagged.flag_primary & flagged.flag_check].sort_values("resid_primary", ascending=False).head(n)
-    cols = ["order_id", "order_item_id", "product_id", "seller_id", "category", "price", "freight_value", "expected_rs",
+    """Top-n flagged cases with the context a reviewer needs (for manual precision-at-k checks).
+
+    Identical units of one listing in one order share every feature and the same freight, so they form one case:
+    one row per order and product, with the number of units.
+    """
+    f = flagged[flagged.flag_primary & flagged.flag_check]
+    f = (f.assign(units=f.groupby(["order_id", "product_id"]).order_id.transform("size"))
+         .sort_values("resid_primary", ascending=False).drop_duplicates(["order_id", "product_id"]).head(n))
+    cols = ["order_id", "product_id", "units", "seller_id", "category", "price", "freight_value", "expected_rs",
             "excess_rs", "weight_kg", "volume_cm3", "chargeable_kg", "distance_km", "seller_state", "customer_state"]
     return f[cols].assign(reviewer_verdict="").reset_index(drop=True)
 

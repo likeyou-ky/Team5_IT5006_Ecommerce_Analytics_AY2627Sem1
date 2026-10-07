@@ -54,6 +54,7 @@ def error_by_price_band(test, pred_log, path=None):
     g = d.groupby("band", observed=True).apply(lambda x: pd.Series({"MAE": (x.freight_value - x.pred).abs().mean(),
                                                                     "MAE % of mean freight": (x.freight_value - x.pred).abs().mean() / x.freight_value.mean() * 100,
                                                                     "n": len(x)}), include_groups=False)
+    g["n"] = g.n.astype(int)
     fig, ax = plt.subplots(figsize=(6.5, 3.8))
     ax.bar(g.index.astype(str), g.MAE, color=T.CAT[0]); T.label_bars(ax, "{:.1f}")
     ax.set_xlabel("item price band (R$)"); ax.set_ylabel("MAE (R$)")
@@ -83,7 +84,8 @@ def ablation_chart_reg(ab, path=None):
 
 
 def ablation_chart_clf(ab, path=None):
-    """Problem 2: forward-chaining CV lift for both families as feature groups are added."""
+    """Problem 2: forward-chaining CV lift for both families as each feature group is tried (forward selection)."""
+    kept = ab.loc[ab.Kept == "yes", "Feature set"].str.replace(r"^\+ | \(.*\)", "", regex=True)
     fig, ax = plt.subplots(figsize=(6.4, 4.4))
     b = ab.iloc[::-1].reset_index(drop=True)
     y = np.arange(len(b))
@@ -93,7 +95,7 @@ def ablation_chart_clf(ab, path=None):
     ax.axvline(1, color=T.AXIS, ls="--")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=9, frameon=False)
     ax.set_xlabel("forward-chaining CV PR-AUC lift (1 = no skill)")
-    T.title(ax, "Problem 2: lift by feature set", "time-ordered folds; only route and order value add reliably")
+    T.title(ax, "Problem 2: lift as feature groups are tried", "time-ordered folds; kept: " + (", ".join(kept) or "none"))
     fig.tight_layout()
     return _save(fig, path)
 

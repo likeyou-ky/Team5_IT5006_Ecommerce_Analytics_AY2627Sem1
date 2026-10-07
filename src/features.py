@@ -15,8 +15,8 @@ Leakage rules (see LEAKAGE_AUDIT)
 * Problem 2: every predictor is known when the order is placed, including the PROMISED delivery date
   (order_estimated_delivery_date is set at checkout). Carrier hand-over, approval, delivery and
   review fields are never used as predictors of the order itself.
-* Seller identity enters only through a TargetEncoder inside the sklearn Pipeline
-  (cross-fitted, fitted on training folds only).
+* Seller identity (Problem 1 only) is tested through a TargetEncoder inside the sklearn Pipeline
+  (cross-fitted, fitted on training folds only) and excluded from the model by design (see LEAKAGE_AUDIT).
 """
 import os
 import numpy as np
@@ -48,30 +48,24 @@ FEATURE_SETS = {
 FULL_SET = "4 + listing & timing"
 
 # ---- Problem 2 (is_late classification, order grain) --------------------------------------
-# purchase_month is deliberately NOT a Problem 2 feature: only one November has delivered orders (2017), and
-# February-March was late in 2018 (14-19%) but not in 2017 (3-5%), so month marks one-off episodes, not a season.
-# The "check" row of the ablation shows it does not help under time-ordered validation.
+# Forward selection (pipeline.ablation_classification): start from the promise and add the groups below in this
+# order; a group is kept only if its paired fold-by-fold gain in PR-AUC lift exceeds its fold sd for at least one
+# family. purchase_month is tested last although it is not expected to help: only one November has delivered orders
+# (2017), and February-March was late in 2018 (14-19%) but not in 2017 (3-5%), so month marks one-off episodes.
 L_ROUTE = ["distance_km", "same_state"]
 L_PARCEL = ["weight_kg", "volume_cm3", "chargeable_kg"]
 L_ORDER = ["price_total", "freight_total", "freight_ratio", "n_items", "n_sellers"]
 L_TIME = ["purchase_dow", "purchase_hour"]
 L_LOAD = ["platform_surge_7d", "seller_load_7d"]
-_PROMISE = ["promised_days"]
-_CATS = CAT_GEO + CAT_PROD
-LATE_FEATURE_SETS = {
-    "0 Promise only (reference)": dict(num=_PROMISE, cat=[], te=[]),
-    "1 + route (distance, states)": dict(num=_PROMISE + L_ROUTE, cat=CAT_GEO, te=[]),
-    "2 + parcel & category": dict(num=_PROMISE + L_ROUTE + L_PARCEL, cat=_CATS, te=[]),
-    "3 + order value & freight": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER, cat=_CATS, te=[]),
-    "4 + purchase weekday & hour": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME, cat=_CATS, te=[]),
-    "5 + congestion (7-day volume surge)": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME + L_LOAD,
-                                                   cat=_CATS, te=[]),
-    "Check: set 3 + purchase month": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + ["purchase_month"], cat=_CATS, te=[]),
+LATE_BASE = dict(num=["promised_days"], cat=[], te=[])
+LATE_GROUPS = {
+    "route (distance, states)": dict(num=L_ROUTE, cat=CAT_GEO, te=[]),
+    "parcel & category": dict(num=L_PARCEL, cat=CAT_PROD, te=[]),
+    "order value & freight": dict(num=L_ORDER, cat=[], te=[]),
+    "purchase weekday & hour": dict(num=L_TIME, cat=[], te=[]),
+    "congestion (7-day volume surge)": dict(num=L_LOAD, cat=[], te=[]),
+    "purchase month": dict(num=["purchase_month"], cat=[], te=[]),
 }
-# Chosen from the forward-chaining ablation: a group is kept only if its paired fold-by-fold gain in PR-AUC lift
-# exceeds its fold sd for at least one family. Route (+1.0) and order value & freight (+0.06 for logistic) pass;
-# purchase weekday/hour, congestion and purchase month do not.
-LATE_FULL_SET = "3 + order value & freight"
 
 # Problem 2 validation: time-ordered, with an embargo so that no training label is "from the future"
 EMBARGO_DAYS = 30        # 95% of orders are delivered within 30 days of purchase
@@ -97,11 +91,11 @@ LEAKAGE_AUDIT = [
     ("2", "platform_surge_7d, seller_load_7d", "Orders placed in the 7 days BEFORE this purchase (timestamps only)",
      "Allowed (trailing window, no labels); tested, not kept"),
     ("2", "purchase_month", "One November only; Feb-Mar late in 2018 (14-19%) but not 2017 (3-5%): marks episodes, not seasons",
-     "Excluded (ablation check)"),
+     "Tested last in forward selection; not kept"),
     ("2", "Time ordering", "A random split lets the model see the same weeks in train and test",
      "Train on earlier orders, test on the latest 20%, 30-day embargo"),
-    ("1+2", "seller_id", "Allowed, but its history uses the target",
-     "TargetEncoder inside the Pipeline (train folds only)"),
+    ("1", "seller_id", "Its history uses the target; a fair benchmark would also learn the seller's own overcharging",
+     "Tested with a TargetEncoder inside the Pipeline (train folds only); excluded by design"),
     ("1", "Items of one order", "Share basket fields and could straddle a split", "Splits and CV grouped by order_id"),
     ("1", "Same product in train and test", "A forest can memorise a listing's own past freight",
      "Robustness split grouped by product_id; audit uses unseen products"),

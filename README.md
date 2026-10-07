@@ -18,7 +18,6 @@ project-root/
 │   ├── Team5_Phase2_IT5006_AY2627Sem1.ipynb   modelling and evaluation — the Phase 2 deliverable
 │   └── draft/individual/                       each member's working notebooks
 ├── src/             reusable modules: features.py, models.py, pipeline.py, plots.py, olist_theme.py
-├── scripts/         run_phase2.py — headless reproduction of every Phase 2 table and figure
 ├── deployment/      Streamlit dashboard (app.py, gen_dashboard_data.py, data/ aggregates)
 ├── docs/            local only, not versioned: reports, EDA summaries, Phase 2 tables and figures
 ├── requirements.txt
@@ -78,14 +77,10 @@ baseline, RandomForest) and Ensemble (Stacking for Problem 1, soft Voting for Pr
 scikit-learn Pipelines; the seed is `RANDOM_STATE = 42`. Problem 2 features use only information available at
 checkout; precision, recall and F1 are reported for the riskiest 10% of orders (an assumed review capacity).
 
-```bash
-export OLIST_DATA_DIR=/path/to/Olist_CSV          # or place the CSVs in data/
-python scripts/run_phase2.py                      # full run, about 20 minutes on 12 cores
-PHASE2_FAST=1 python scripts/run_phase2.py        # smoke test on a sample
-```
-
-The notebook and `scripts/run_phase2.py` call the same functions in `src/` and write the same tables to
-`docs/phase2/tables/` and figures to `docs/phase2/figures/` (generated locally, not versioned).
+To reproduce it, put the CSVs in `data/` (or set `OLIST_DATA_DIR`) and run the notebook top to bottom (about 20
+minutes on 12 cores; set `PHASE2_FAST=1` before starting Jupyter for a smoke test on a sample). It calls the
+functions in `src/` and writes its tables to `docs/phase2/tables/` and figures to `docs/phase2/figures/`
+(generated locally, not versioned).
 
 ## Dashboard
 

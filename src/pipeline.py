@@ -1,8 +1,8 @@
-"""Phase 2 experiment steps, shared by the notebook and scripts/run_phase2.py.
+"""Phase 2 experiment steps, called by the Phase 2 notebook.
 
 Problem 1 (freight regression) works on the ITEM table; Problem 2 (is_late classification)
 works on the ORDER table. Each function does one step of the workflow and returns tidy
-DataFrames so the notebook can show them and the script can save them.
+DataFrames so the notebook can show and save them.
 
 Validation
 * Problem 1: 80/20 hold-out grouped by order_id (stratified on target quintiles), 5-fold grouped CV;
@@ -27,6 +27,21 @@ ORDER_A = ["Mean predictor (dummy)", "Linear: LinearRegression", "Linear: Ridge"
            "Tree: RandomForest", "Ensemble: Stacking (Ridge + RF)"]
 ORDER_B = ["Prior predictor (dummy)", "Linear: LogisticRegression (plain)", "Linear: Logistic (L2)",
            "Tree: DecisionTree (baseline)", "Tree: RandomForest", "Ensemble: Voting (Logit + RF)"]
+# (family, baseline, advanced) for baseline_vs_advanced; a list means "the better of these by CV score"
+PAIRS_A = [("Linear", "Linear: LinearRegression", "Linear: Ridge"),
+           ("Tree-based", "Tree: DecisionTree (baseline)", "Tree: RandomForest"),
+           ("Linear vs tree", ORDER_A[1:3], ORDER_A[3:5]),
+           ("Ensemble vs its better member", ["Linear: Ridge", "Tree: RandomForest"], "Ensemble: Stacking (Ridge + RF)")]
+PAIRS_B = [("Linear", "Linear: LogisticRegression (plain)", "Linear: Logistic (L2)"),
+           ("Tree-based", "Tree: DecisionTree (baseline)", "Tree: RandomForest"),
+           ("Linear vs tree", ORDER_B[1:3], ORDER_B[3:5]),
+           ("Ensemble vs its better member", ["Linear: Logistic (L2)", "Tree: RandomForest"], "Ensemble: Voting (Logit + RF)")]
+# Problem 2 error analysis: customer state -> region (North pooled with Northeast: few late orders in the test window)
+REGIONS = {"SP": "São Paulo", **dict.fromkeys(["ES", "MG", "RJ"], "Rest of Southeast"),
+           **dict.fromkeys(["PR", "RS", "SC"], "South"), **dict.fromkeys(["DF", "GO", "MT", "MS"], "Central-West"),
+           **dict.fromkeys(["AC", "AP", "AM", "PA", "RO", "RR", "TO", "AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+                           "North & Northeast")}
+PROMISE_BANDS = ([0, 14, 21, 28, 35, np.inf], ["< 14", "14-20", "21-27", "28-34", "35+"])
 
 
 def cols_for(fs):
@@ -341,6 +356,74 @@ def test_by_month(fitted_model, test, fs):
             .reset_index().rename(columns={"ym": "Month"}))
 
 
+# ------------------------------------------------------------------ train / validation / test, baselines, errors
+def train_val_test_regression(fitted, train, fs, cv, test):
+    """MAE and R2 (R$) of every model on its own training data (in-sample), in 5-fold CV and on the test set.
+
+    Train much better than CV = overfitting (the model memorises its training rows); all three poor = underfitting.
+    """
+    X, c, t, rows = train[cols_for(fs)], cv.set_index("Model"), test.set_index("Model"), []
+    for n, m in fitted.items():
+        tr = M.reg_metrics(train.reg_target, m.predict(X))
+        rows.append({"Model": n, "Train MAE": tr["MAE_rs"], "CV MAE": c.loc[n, "MAE_rs mean"], "Test MAE": t.loc[n, "MAE_rs"],
+                     "CV - train MAE": c.loc[n, "MAE_rs mean"] - tr["MAE_rs"],
+                     "Train R2": tr["R2_rs"], "CV R2": c.loc[n, "R2_rs mean"], "Test R2": t.loc[n, "R2_rs"]})
+    return pd.DataFrame(rows)
+
+
+def train_val_test_classification(fitted, train, fs, cv, test):
+    """PR-AUC lift and ROC-AUC of every model on its own training orders, in forward-chaining CV and on the test set.
+
+    Lift (PR-AUC / late rate) is compared rather than PR-AUC because the late rate differs between the training
+    orders, the CV validation blocks and the test window.
+    """
+    X, y, c, t, rows = train[cols_for(fs)], train.clf_target, cv.set_index("Model"), test.set_index("Model"), []
+    for n, m in fitted.items():
+        s = M.clf_scores(m, X)
+        rows.append({"Model": n, "Train lift": M.pr_lift(y, s), "CV lift": c.loc[n, "Lift mean"], "Test lift": t.loc[n, "Lift"],
+                     "Train - CV lift": M.pr_lift(y, s) - c.loc[n, "Lift mean"], "Train ROC-AUC": roc_auc_score(y, s),
+                     "CV ROC-AUC": c.loc[n, "ROC_AUC mean"], "Test ROC-AUC": t.loc[n, "ROC_AUC"]})
+    return pd.DataFrame(rows)
+
+
+def baseline_vs_advanced(cv, test, pairs, col, sd_col, test_col, higher):
+    """Does each advanced model beat its baseline by more than one fold sd of CV score (the selection rule)?
+
+    Gain > 0 means the advanced model is better (lower MAE or higher lift). As in pick_final, the sd is that of the
+    better model of the pair. Test gain is shown for information only; selection uses CV.
+    """
+    c, t, sign, rows = cv.set_index("Model"), test.set_index("Model"), 1 if higher else -1, []
+    best = lambda m: max(m, key=lambda k: sign * c.loc[k, col]) if isinstance(m, list) else m
+    for fam, base, adv in pairs:
+        base, adv = best(base), best(adv)
+        gain = sign * (c.loc[adv, col] - c.loc[base, col])
+        sd = c.loc[adv if gain > 0 else base, sd_col]
+        rows.append({"Comparison": fam, "Baseline": base, "Advanced": adv, "Baseline CV": c.loc[base, col],
+                     "Advanced CV": c.loc[adv, col], "CV gain": gain, "Fold sd": sd,
+                     "Test gain": sign * (t.loc[adv, test_col] - t.loc[base, test_col]),
+                     "Verdict": ("advanced better (gain > 1 sd)" if gain > sd else
+                                 "no better than baseline (within 1 sd)" if gain > -sd else "advanced worse (by > 1 sd)")})
+    return pd.DataFrame(rows)
+
+
+def missed_late_orders(test, flags):
+    """Problem 2 error analysis: late orders caught and missed by the review rule, by promised days and by region."""
+    bins, labels = PROMISE_BANDS
+    d = test.assign(flag=np.asarray(flags), band=pd.cut(test.promised_days, bins, right=False, labels=labels),
+                    region=pd.Categorical(test.customer_state.map(REGIONS), categories=list(dict.fromkeys(REGIONS.values()))))
+    d["caught"] = d.flag * d.clf_target
+    missed = d.clf_target.sum() - d.caught.sum()
+    out = []
+    for by, label in [("band", "Promised days"), ("region", "Customer region")]:
+        g = d.groupby(by, observed=True).agg(Orders=("flag", "size"), late=("clf_target", "sum"), flagged=("flag", "sum"),
+                                             Caught=("caught", "sum"))
+        out.append(pd.DataFrame({"Breakdown": label, "Group": g.index.astype(str), "Orders": g.Orders,
+                                 "Late orders": g.late, "Late rate": g.late / g.Orders, "Flagged share": g.flagged / g.Orders,
+                                 "Caught": g.Caught, "Precision": g.Caught / g.flagged.where(g.flagged > 0),
+                                 "Recall": g.Caught / g.late, "Share of missed late orders": (g.late - g.Caught) / missed}))
+    return pd.concat(out, ignore_index=True)
+
+
 # ------------------------------------------------------------------ ablation (feature breadth)
 def ablation_regression(train, n_rows=40000, k=3):
     sub = subsample(train, n_rows)
@@ -483,3 +566,4 @@ def audit_review_sheet(flagged, n=30):
     cols = ["order_id", "order_item_id", "product_id", "seller_id", "category", "price", "freight_value", "expected_rs",
             "excess_rs", "weight_kg", "volume_cm3", "chargeable_kg", "distance_km", "seller_state", "customer_state"]
     return f[cols].assign(reviewer_verdict="").reset_index(drop=True)
+

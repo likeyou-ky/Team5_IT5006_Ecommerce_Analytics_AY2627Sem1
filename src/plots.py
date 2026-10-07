@@ -113,6 +113,22 @@ def gain_chart(gain, path=None):
     return _save(fig, path)
 
 
+def missed_late_chart(tbl, path=None):
+    """Problem 2 error analysis: late orders caught vs missed by the review rule, by promise length and by region."""
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.8))
+    for a, (by, g) in zip(ax, tbl.groupby("Breakdown", sort=False)):
+        g = g.iloc[::-1]
+        a.barh(g.Group.astype(str), g.Caught, color=T.CAT[0], label="caught (flagged)")
+        a.barh(g.Group.astype(str), g["Late orders"] - g.Caught, left=g.Caught, color=T.MUTED, label="missed")
+        for i, (n, r) in enumerate(zip(g["Late orders"], g.Recall)):
+            a.text(n, i, f"  {r:.0%}", va="center", fontsize=9, color=T.MUTED)
+        a.set_xlabel("late orders in the test window")
+        T.title(a, f"Missed late orders by {by.lower()}", "label = recall (share of the group's late orders flagged)")
+    ax[0].legend(loc="lower right", fontsize=9, frameon=False)
+    fig.tight_layout()
+    return _save(fig, path)
+
+
 def clf_curves(fitted, test, fs_cols, y, path=None, names=None):
     names = names or list(fitted)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))

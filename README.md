@@ -74,7 +74,8 @@ the data accordingly.
 
 Three model families across both problems: Linear (LinearRegression/Ridge, Logistic), Tree-based (DecisionTree
 baseline, RandomForest) and Ensemble (Stacking for Problem 1, soft Voting for Problem 2). All preprocessing sits inside
-scikit-learn Pipelines; the seed is `RANDOM_STATE = 42`. Problem 2 features use only information available at
+scikit-learn Pipelines; the seed is `RANDOM_STATE = 42`. Feature groups are chosen on the training data only, by their
+paired fold-by-fold gain (forward selection for Problem 2). Problem 2 features use only information available at
 checkout; precision, recall and F1 are reported for the riskiest 10% of orders (an assumed review capacity).
 
 To reproduce it, put the CSVs in `data/` (or set `OLIST_DATA_DIR`) and run the notebook top to bottom (about 15

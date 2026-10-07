@@ -79,7 +79,7 @@ fit_a, fit_b = P.fit_all(reg_models, tr_a, "reg_target", fs_a), P.fit_all(clf_mo
 test_a = save(P.test_regression(fit_a, te_a, fs_a), "test_regression.csv")
 test_b = save(P.test_classification(fit_b, te_b, fs_b, share_b), "test_classification.csv")
 cmp_b, rand_rate = P.split_comparison(clf_models, orders, fs_b, test_b)
-cmp_b = save(pd.concat([cmp_b, P.draft_spec_check(orders)], ignore_index=True), "split_comparison_2.csv")
+save(cmp_b, "split_comparison_2.csv")
 PL.comparison_chart_reg(test_a, f"{FIG}/03_comparison_1.png")
 PL.comparison_chart_clf(cmp_b, f"{FIG}/03_comparison_2.png")
 
@@ -94,9 +94,9 @@ save(PL.error_by_price_band(te_a, pred_a, f"{FIG}/05_error_by_price_band.png").r
 PL.clf_curves(fit_b, te_b, cols_b, te_b.clf_target, f"{FIG}/06_roc_pr.png",
               ["Linear: Logistic (L2)", "Tree: RandomForest", "Ensemble: Voting (Logit + RF)"])
 score_b = M.clf_scores(fit_b[FINAL_B], te_b[cols_b])
-flags_b = M.flag_top_share(score_b, M.purchase_day(te_b), share_b[FINAL_B])
+flags_b = M.flag_top_share(score_b, share_b[FINAL_B])
 PL.confusion(te_b.clf_target, flags_b, f"{FIG}/07_confusion.png",
-             f"{FINAL_B.split(': ')[-1]}, riskiest {share_b[FINAL_B]:.0%} of each day")
+             f"{FINAL_B.split(': ')[-1]}, riskiest {share_b[FINAL_B]:.0%} of orders flagged")
 imp_a = save(P.perm_importance(fit_a[FINAL_A], te_a, fs_a, "reg_target"), "perm_importance_1.csv")
 imp_b = save(P.perm_importance(fit_b[FINAL_B], te_b, fs_b, "clf_target"), "perm_importance_2.csv")
 PL.importance_bar(imp_a, "Problem 1: what drives freight", f"{FIG}/08_importance_1.png", unit="(dMAE, log scale)")

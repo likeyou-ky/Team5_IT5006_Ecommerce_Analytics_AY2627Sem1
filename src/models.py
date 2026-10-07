@@ -32,7 +32,7 @@ from features import EMBARGO_DAYS, RANDOM_STATE, TEST_FRAC
 DAY = 86400.0
 
 SKEWED = {"weight_kg", "volume_cm3", "chargeable_kg", "distance_km", "price", "price_total", "freight_total",
-          "seller_load_7d", "hist_seller_n", "backlog_platform", "backlog_state"}
+          "seller_load_7d"}
 
 
 # --------------------------------------------------------------------------- splitting
@@ -200,18 +200,21 @@ def pr_lift(y, score):
 LIFT_SCORER = make_scorer(pr_lift, response_method="predict_proba")
 
 
-def flag_top_share(score, day, share):
-    """Daily review budget: flag the `share` highest-risk orders among each purchase day's orders.
+def flag_top_share(score, share):
+    """Decision rule: flag the `share` highest-risk orders among those being scored (top-k by risk).
 
-    Ranking within the day needs no calibrated probability or fixed cut-off, so it is robust to the
-    late rate drifting over time (1% to 19% by month in these data).
+    `share` is an assumed review capacity (10% by default). Ranking needs no calibrated probability or fixed
+    cut-off, so it is robust to the late rate drifting over time (1% to 19% by month in these data).
+    Ties are broken at random (fixed seed), so a constant-score model flags a random 10%, i.e. random review.
     """
-    r = pd.Series(np.asarray(score)).groupby(np.asarray(day)).rank(pct=True, method="first")
-    return (r.values > 1 - share).astype(int)
+    s = np.asarray(score, dtype=float)
+    tie = np.random.RandomState(RANDOM_STATE).rand(len(s))
+    top = np.lexsort((tie, s))[::-1][:int(round(share * len(s)))]       # highest score first
+    out = np.zeros(len(s), dtype=int)
+    out[top] = 1
+    return out
 
 
-def purchase_day(df):
-    return np.floor(df.purchase_ts.values / DAY).astype(int)
 def reg_metrics(y_log, pred_log):
     """Metrics on the log scale (model target) and on the original R$ scale."""
     pred_log = np.asarray(pred_log)
@@ -228,7 +231,7 @@ def clf_scores(model, X):
 
 
 def clf_metrics(y, score, threshold=0.5, pred=None):
-    """Threshold metrics use `pred` if given (e.g. the daily review budget), else score >= threshold."""
+    """Threshold metrics use `pred` if given (e.g. the top-10% review rule), else score >= threshold."""
     y = np.asarray(y)
     pred = (np.asarray(score) >= threshold).astype(int) if pred is None else np.asarray(pred)
     out = dict(Flagged=pred.mean(), Precision=precision_score(y, pred, zero_division=0), Recall=recall_score(y, pred),

@@ -15,8 +15,6 @@ Leakage rules (see LEAKAGE_AUDIT)
 * Problem 2: every predictor is known when the order is placed, including the PROMISED delivery date
   (order_estimated_delivery_date is set at checkout). Carrier hand-over, approval, delivery and
   review fields are never used as predictors of the order itself.
-* Problem 2 history features use other orders' outcomes only if those orders were DELIVERED BEFORE this
-  purchase, so the information existed at checkout.
 * Seller identity enters only through a TargetEncoder inside the sklearn Pipeline
   (cross-fitted, fitted on training folds only).
 """
@@ -58,9 +56,6 @@ L_PARCEL = ["weight_kg", "volume_cm3", "chargeable_kg"]
 L_ORDER = ["price_total", "freight_total", "freight_ratio", "n_items", "n_sellers"]
 L_TIME = ["purchase_dow", "purchase_hour"]
 L_LOAD = ["platform_surge_7d", "seller_load_7d"]
-L_HIST = ["hist_platform_late_30d", "hist_state_late_90d", "hist_route_days_90d", "promise_slack"]
-L_BACKLOG = ["backlog_platform", "backlog_state"]
-L_SELLER = ["hist_seller_late", "hist_seller_n"]
 _PROMISE = ["promised_days"]
 _CATS = CAT_GEO + CAT_PROD
 LATE_FEATURE_SETS = {
@@ -71,29 +66,17 @@ LATE_FEATURE_SETS = {
     "4 + purchase weekday & hour": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME, cat=_CATS, te=[]),
     "5 + congestion (7-day volume surge)": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME + L_LOAD,
                                                    cat=_CATS, te=[]),
-    "6 + delivery history (route slack, recent late rates)": dict(
-        num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME + L_LOAD + L_HIST, cat=_CATS, te=[]),
-    "7 + overdue backlog": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME + L_LOAD + L_HIST + L_BACKLOG,
-                                cat=_CATS, te=[]),
-    "8 + seller late history": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + L_TIME + L_LOAD + L_HIST + L_SELLER,
-                                    cat=_CATS, te=[]),
     "Check: set 3 + purchase month": dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + ["purchase_month"], cat=_CATS, te=[]),
 }
 # Chosen from the forward-chaining ablation: a group is kept only if its paired fold-by-fold gain in PR-AUC lift
 # exceeds its fold sd for at least one family. Route (+1.0) and order value & freight (+0.06 for logistic) pass;
-# weekday/hour, congestion, delivery history, backlog, seller history and month do not.
+# purchase weekday/hour, congestion and purchase month do not.
 LATE_FULL_SET = "3 + order value & freight"
-
-# The specification of the first Phase 2 draft (random split): calendar month and raw platform volume.
-# Kept only to show, in the split comparison, how far a random split overstated its skill.
-DRAFT_SET = dict(num=_PROMISE + L_ROUTE + L_PARCEL + L_ORDER + NUM_TIME + ["platform_load_7d", "seller_load_7d"],
-                 cat=_CATS, te=[])
-DRAFT_RF = dict(n_estimators=200, min_samples_leaf=10, max_features=0.5, max_depth=None, class_weight="balanced")
 
 # Problem 2 validation: time-ordered, with an embargo so that no training label is "from the future"
 EMBARGO_DAYS = 30        # 95% of orders are delivered within 30 days of purchase
 TEST_FRAC = 0.2
-REVIEW_SHARE = 0.10      # operating rule: the ops team reviews the riskiest 10% of each day's orders
+REVIEW_SHARE = 0.10      # decision rule: flag the riskiest 10% of orders (an assumed review capacity)
 # Rolling-origin test windows (about three months each); the fourth window starts at the main hold-out cut-off
 ROLLING_STARTS = ["2017-09-01", "2017-12-01", "2018-03-01"]
 
@@ -112,11 +95,7 @@ LEAKAGE_AUDIT = [
     ("2", "price, freight, weight, distance, category, states, basket, purchase time", "Known at order placement",
      "Allowed"),
     ("2", "platform_surge_7d, seller_load_7d", "Orders placed in the 7 days BEFORE this purchase (timestamps only)",
-     "Allowed (trailing window, no labels)"),
-    ("2", "hist_* late rates, route delivery days, promise_slack",
-     "Use other orders' outcomes", "Allowed only from orders DELIVERED BEFORE this purchase"),
-    ("2", "backlog_* (orders past their promised date, not yet delivered)",
-     "Known at checkout: the promise has passed and no delivery is recorded", "Tested; not kept (ablation)"),
+     "Allowed (trailing window, no labels); tested, not kept"),
     ("2", "purchase_month", "One November only; Feb-Mar late in 2018 (14-19%) but not 2017 (3-5%): marks episodes, not seasons",
      "Excluded (ablation check)"),
     ("2", "Time ordering", "A random split lets the model see the same weeks in train and test",
@@ -211,75 +190,6 @@ def build_item_table(data_dir=None):
     return df[keep].reset_index(drop=True)
 
 
-def _trailing(ev_key, ev_t, ev_val, q_key, q_t, window=None):
-    """Sum and count of ev_val over events with the same key and ev_t < q_t (and ev_t >= q_t - window).
-
-    Events are other orders keyed by their DELIVERY time, queries are purchases, so only outcomes that
-    were already known at the moment of purchase are counted (an order never counts itself).
-    """
-    s_out, n_out = np.zeros(len(q_t)), np.zeros(len(q_t))
-    ev = pd.DataFrame({"k": ev_key, "t": ev_t, "v": ev_val}).sort_values("t")
-    q = pd.DataFrame({"k": q_key, "t": q_t, "i": np.arange(len(q_t))})
-    qg = dict(tuple(q.groupby("k")))
-    for k, g in ev.groupby("k"):
-        if k not in qg:
-            continue
-        qq = qg[k]
-        t, c = g.t.values, np.concatenate([[0.0], np.cumsum(g.v.values)])
-        hi = np.searchsorted(t, qq.t.values, side="left")
-        lo = np.searchsorted(t, qq.t.values - window, side="left") if window else np.zeros_like(hi)
-        s_out[qq.i.values], n_out[qq.i.values] = c[hi] - c[lo], hi - lo
-    return s_out, n_out
-
-
-def _add_history(o, day=86400.0):
-    """Delivery-history features from orders delivered before each purchase (no look-ahead).
-
-    hist_platform_late_30d : platform late rate among orders delivered in the previous 30 days
-    hist_state_late_90d    : same, for the buyer's state over 90 days (shrunk to the platform rate)
-    hist_route_days_90d    : mean purchase-to-delivery days on the seller-state -> buyer-state route
-                             over 90 days (shrunk to the state, then platform, mean)
-    promise_slack          : promised_days - hist_route_days_90d (how much padding the promise has)
-    backlog_platform/state : orders whose promised date has passed but which are not yet delivered
-    hist_seller_late / _n  : the seller's late rate (shrunk) and number of earlier delivered orders
-    """
-    tp, td, te = o.purchase_ts.values, o.delivered_ts.values, o.estimated_ts.values
-    late, days = o.clf_target.values.astype(float), (td - tp) / day
-    one = np.zeros(len(o))
-    route = (o.seller_state + ">" + o.customer_state).values
-    st = o.customer_state.values
-
-    s, n = _trailing(one, td, late, one, tp, 30 * day)
-    plat = np.where(n > 0, s / np.maximum(n, 1), late.mean())
-    o["hist_platform_late_30d"] = plat
-    s, n = _trailing(st, td, late, st, tp, 90 * day)
-    o["hist_state_late_90d"] = (s + 20 * plat) / (n + 20)
-
-    s, n = _trailing(one, td, days, one, tp, 90 * day)
-    plat_days = np.where(n > 0, s / np.maximum(n, 1), np.median(days))
-    s, n = _trailing(st, td, days, st, tp, 90 * day)
-    st_days = (s + 20 * plat_days) / (n + 20)
-    s, n = _trailing(route, td, days, route, tp, 90 * day)
-    o["hist_route_days_90d"] = (s + 20 * st_days) / (n + 20)
-    o["promise_slack"] = o.promised_days - o.hist_route_days_90d
-
-    # overdue backlog: est < t < delivered. Such orders have delivered > estimated, and for them
-    # "delivered <= t" implies "est < t", so backlog(t) = #(est < t) - #(delivered <= t).
-    over = td > te
-    for name, key in [("backlog_platform", one), ("backlog_state", st)]:
-        out = np.zeros(len(o))
-        for k in np.unique(key):
-            q, e = key == k, over & (key == k)
-            out[q] = (np.searchsorted(np.sort(te[e]), tp[q], side="left")
-                      - np.searchsorted(np.sort(td[e]), tp[q], side="right"))
-        o[name] = out
-
-    s, n = _trailing(o.seller_id.values, td, late, o.seller_id.values, tp, None)
-    o["hist_seller_late"] = (s + 10 * plat) / (n + 10)
-    o["hist_seller_n"] = n
-    return o
-
-
 def load_low_reviews(data_dir=None):
     """order_id -> low (review score 1-2), latest review per order.
 
@@ -334,12 +244,8 @@ def build_order_table(data_dir=None):
     o["clf_target"] = (days_late > 0).astype(int)
     o["days_late"] = days_late                                     # reporting only, never a predictor
     o["purchase_ts"] = _seconds(o.order_purchase_timestamp)
-    o["delivered_ts"] = _seconds(o.order_delivered_customer_date)  # used only for history features, then dropped
-    o["estimated_ts"] = _seconds(o.order_estimated_delivery_date)
-    o = _add_history(o)
 
     cu = pd.read_csv(os.path.join(d, "olist_customers_dataset.csv"), usecols=["customer_id", "customer_unique_id"])
     o = o.merge(cu, on="customer_id", how="left")                  # the real person, for split checks only
-    drop = ["order_estimated_delivery_date", "order_delivered_customer_date", "delivered_ts", "estimated_ts",
-            "customer_id"]
+    drop = ["order_estimated_delivery_date", "order_delivered_customer_date", "customer_id"]
     return o.drop(columns=drop).sort_values("purchase_ts", kind="stable").reset_index(drop=True)

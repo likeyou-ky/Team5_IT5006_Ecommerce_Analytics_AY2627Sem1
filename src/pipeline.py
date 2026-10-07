@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import average_precision_score, f1_score, mean_absolute_error, roc_auc_score
+from sklearn.metrics import average_precision_score, mean_absolute_error, roc_auc_score
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 
 import features as F
@@ -68,7 +68,7 @@ def scoping_checklist(orders):
          "Phase 1: strong state gradient (SP 4.5% late vs AL 21.4%); late rate varies 1-19% by month."],
         ["4. Class imbalance has a mitigation plan", "None needed (continuous target).",
          f"{orders.clf_target.mean():.1%} late: PR-AUC and its lift as primary metrics, class_weight tuned, "
-         "time-ordered validation, a fixed 10% daily review budget, no-skill baseline shown."],
+         "time-ordered validation, precision / recall / F1 for the riskiest 10% of orders, no-skill baseline shown."],
         ["5. A real business stakeholder", "Logistics-pricing / finance analyst.", "Operations and customer-experience team."]],
         columns=["Checklist item", "Problem 1 (freight)", "Problem 2 (is_late)"])
 
@@ -187,47 +187,38 @@ def cv_regression(models, train, fs, k=5):
     return pd.DataFrame(rows)
 
 
-def best_share(y, score, day, shares=(0.05, 0.10, 0.15, 0.20, 0.25)):
-    """Daily review budget that maximises F1 on out-of-fold training scores (frozen before the test set)."""
-    f1 = {s: f1_score(y, M.flag_top_share(score, day, s)) for s in shares}
-    return max(f1, key=f1.get)
-
-
 def cv_classification(models, train, fs, k=5, share=F.REVIEW_SHARE):
-    """5-fold forward-chaining CV at a fixed daily review budget.
+    """5-fold forward-chaining CV.
 
-    Out-of-fold (OOF) scores exist for the five validation blocks. Precision / recall / F1 use the operating
-    rule "flag the riskiest `share` of each day's orders"; the F1-optimal share on the pooled OOF scores is
-    reported for reference only (it runs to large shares when precision is low, which no ops team could
-    staff). ROC-AUC, PR-AUC and lift are threshold-free.
+    Each round trains on earlier orders and scores the next time block. Precision / recall / F1 use the decision
+    rule "flag the riskiest `share` of the orders in the validation block"; ROC-AUC, PR-AUC and lift are
+    threshold-free.
     """
     X, y = train[cols_for(fs)], train.clf_target
-    day = M.purchase_day(train)
     folds_idx = list(M.TimeForwardCV(k).split(X))
-    seen = np.concatenate([va for _, va in folds_idx])
     rows, shares = [], {}
     for name, m in models.items():
         oof = np.full(len(X), np.nan)
         for tr, va in folds_idx:
             mm = clone(m).fit(X.iloc[tr], y.iloc[tr])
             oof[va] = M.clf_scores(mm, X.iloc[va])
-        f1_opt = best_share(y.values[seen], oof[seen], day[seen]) if np.ptp(oof[seen]) > 0 else np.nan
         shares[name] = share
-        f = pd.DataFrame([M.clf_metrics(y.iloc[va], oof[va], pred=M.flag_top_share(oof[va], day[va], share))
+        f = pd.DataFrame([M.clf_metrics(y.iloc[va], oof[va], pred=M.flag_top_share(oof[va], share))
                           for _, va in folds_idx])
-        rows.append({"Model": name, "Review share": share, "F1-optimal share": f1_opt,
+        rows.append({"Model": name, "Review share": share,
                      **{f"{c} mean": f[c].mean() for c in ["Precision", "Recall", "F1", "ROC_AUC", "PR_AUC", "Lift"]},
                      **{f"{c} sd": f[c].std() for c in ["F1", "PR_AUC", "Lift"]}})
     return pd.DataFrame(rows), shares
 
 
 def cv_fold_table(train, k=5):
-    """Dates, sizes and late rate of every forward-chaining fold."""
+    """Dates, sizes and late rate of every forward-chaining fold (training always starts at the first order)."""
     rows = []
     for j, (tr, va) in enumerate(M.TimeForwardCV(k).split(train), 1):
-        d = train.order_purchase_timestamp.iloc[va]
-        rows.append({"Fold": j, "Train orders": len(tr), "Validation orders": len(va),
-                     "Validation dates": f"{d.min():%Y-%m-%d} to {d.max():%Y-%m-%d}",
+        t, d = train.order_purchase_timestamp.iloc[tr], train.order_purchase_timestamp.iloc[va]
+        rows.append({"Fold": j, "Train dates": f"{t.min():%Y-%m-%d} to {t.max():%Y-%m-%d}", "Train orders": len(tr),
+                     "Train late rate": train.clf_target.iloc[tr].mean(),
+                     "Validation dates": f"{d.min():%Y-%m-%d} to {d.max():%Y-%m-%d}", "Validation orders": len(va),
                      "Validation late rate": train.clf_target.iloc[va].mean()})
     return pd.DataFrame(rows)
 
@@ -244,11 +235,11 @@ def test_regression(fitted, test, fs):
 
 
 def test_classification(fitted, test, fs, shares):
-    X, day, rows = test[cols_for(fs)], M.purchase_day(test), []
+    X, rows = test[cols_for(fs)], []
     for n, m in fitted.items():
         s = M.clf_scores(m, X)
         rows.append({"Model": n, "Review share": shares[n],
-                     **M.clf_metrics(test.clf_target, s, pred=M.flag_top_share(s, day, shares[n]))})
+                     **M.clf_metrics(test.clf_target, s, pred=M.flag_top_share(s, shares[n]))})
     return pd.DataFrame(rows)
 
 
@@ -290,7 +281,7 @@ def rolling_windows(models, orders, fs, share=F.REVIEW_SHARE):
         # same boundary convention as M.time_holdout, so W4 is exactly the main hold-out
         tr = orders[orders.order_purchase_timestamp <= a - pd.Timedelta(days=F.EMBARGO_DAYS)]
         te = orders[(orders.order_purchase_timestamp > a) & (orders.order_purchase_timestamp <= b)]
-        X, day = te[cols_for(fs)], M.purchase_day(te)
+        X = te[cols_for(fs)]
         d = te.order_purchase_timestamp
         info = {"Window": f"W{w}", "Test dates": f"{d.min():%d %b %Y} to {d.max():%d %b %Y}",
                 "Train orders": len(tr), "Test orders": len(te), "Late rate": te.clf_target.mean(),
@@ -298,7 +289,7 @@ def rolling_windows(models, orders, fs, share=F.REVIEW_SHARE):
         lw = low.reindex(te.order_id).values
         for n, m in models.items():
             s = M.clf_scores(clone(m).fit(tr[cols_for(fs)], tr.clf_target), X)
-            flag = M.flag_top_share(s, day, share)
+            flag = M.flag_top_share(s, share)
             met = M.clf_metrics(te.clf_target, s, pred=flag)
             ok = ~np.isnan(lw)
             rows.append({**info, "Model": n, "PR-AUC": met["PR_AUC"], "Lift": met["Lift"], "ROC-AUC": met["ROC_AUC"],
@@ -326,19 +317,6 @@ def promise_timeline(orders):
     wk["late_rate"] = ts.clf_target.resample("W-SUN").mean()
     last_full = orders.order_purchase_timestamp.max().normalize()          # a week counts only if it ended in the data
     return wk[(wk.index >= "2017-01-08") & (wk.index <= last_full) & (wk.orders >= 100)].reset_index(names="week_ending")
-
-
-def draft_spec_check(orders):
-    """The first draft's forest (calendar month, raw platform volume) under a random and the time-ordered split."""
-    fs = F.DRAFT_SET
-    m = M.clf_estimators(fs, F.DRAFT_RF)["Tree: RandomForest"]
-    out = {"Model": "Draft spec: RandomForest with month & raw volume"}
-    for lbl, (tr, te) in [("Random", M.holdout_split(orders, orders.clf_target, groups=orders.customer_unique_id)),
-                          ("Time-ordered", M.time_holdout(orders))]:
-        s = M.clf_scores(clone(m).fit(tr[cols_for(fs)], tr.clf_target), te[cols_for(fs)])
-        out.update({f"{lbl} PR-AUC": average_precision_score(te.clf_target, s), f"{lbl} lift": M.pr_lift(te.clf_target, s),
-                    f"{lbl} ROC-AUC": roc_auc_score(te.clf_target, s)})
-    return pd.DataFrame([out])
 
 
 def gain_table(y, score, bins=10):

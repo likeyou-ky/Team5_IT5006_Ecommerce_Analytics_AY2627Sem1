@@ -76,8 +76,7 @@ the data accordingly.
 Three model families across both problems: Linear (LinearRegression/Ridge, Logistic), Tree-based (DecisionTree
 baseline, RandomForest) and Ensemble (Stacking for Problem 1, soft Voting for Problem 2). All preprocessing sits inside
 scikit-learn Pipelines; the seed is `RANDOM_STATE = 42`. Problem 2 features use only information available at
-checkout, including delivery history from orders delivered before the purchase; its operating rule is a daily
-review budget (the riskiest 10% of each day's orders).
+checkout; precision, recall and F1 are reported for the riskiest 10% of orders (an assumed review capacity).
 
 ```bash
 export OLIST_DATA_DIR=/path/to/Olist_CSV          # or place the CSVs in data/

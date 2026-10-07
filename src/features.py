@@ -9,14 +9,14 @@ Problem 2 (classification, ORDER grain): build_order_table()
     (same definition as Phase 1: (delivered - estimated).dt.days > 0, delivered orders only;
     the estimated date is a midnight timestamp, so this means "after the promised day")
 
-Leakage rules (see LEAKAGE_AUDIT)
----------------------------------
+Leakage rules (the full audit is a table in Section 3 of the notebook)
+---------------------------------------------------------------------
 * Problem 1: freight_value is the target and is never a predictor.
 * Problem 2: every predictor is known when the order is placed, including the PROMISED delivery date
   (order_estimated_delivery_date is set at checkout). Carrier hand-over, approval, delivery and
   review fields are never used as predictors of the order itself.
 * Seller identity (Problem 1 only) is tested through a TargetEncoder inside the sklearn Pipeline
-  (cross-fitted, fitted on training folds only) and excluded from the model by design (see LEAKAGE_AUDIT).
+  (cross-fitted, fitted on training folds only) and excluded from the model by design.
 """
 import os
 import numpy as np
@@ -73,34 +73,6 @@ TEST_FRAC = 0.2
 REVIEW_SHARE = 0.10      # decision rule: flag the riskiest 10% of orders (an assumed review capacity)
 # Rolling-origin test windows (about three months each); the fourth window starts at the main hold-out cut-off
 ROLLING_STARTS = ["2017-09-01", "2017-12-01", "2018-03-01"]
-
-LEAKAGE_AUDIT = [
-    ("1", "freight_value", "Is the regression target", "Never a predictor"),
-    ("1", "price, weight, dimensions, category, listing text lengths", "Fixed on the listing at checkout", "Allowed"),
-    ("1", "seller / customer state, zip-centroid distance", "Seller listing and buyer address", "Allowed"),
-    ("1", "n_items, n_sellers in the basket; purchase time parts", "Known at order placement", "Allowed"),
-    ("2", "order_delivered_customer_date", "Defines is_late; only known after delivery", "Target only, never a predictor"),
-    ("2", "order_delivered_carrier_date, order_approved_at", "Known only after payment clears / the seller ships",
-     "Never used"),
-    ("2", "review_* columns, order_status", "Exist only after delivery; status is the final outcome",
-     "Never a feature; review score used only to measure business impact"),
-    ("2", "order_estimated_delivery_date -> promised_days", "The promise is set and shown at checkout",
-     "Allowed (as promised days)"),
-    ("2", "price, freight, weight, distance, category, states, basket, purchase time", "Known at order placement",
-     "Allowed"),
-    ("2", "platform_surge_7d, seller_load_7d", "Orders placed in the 7 days BEFORE this purchase (timestamps only)",
-     "Allowed (trailing window, no labels); tested, not kept"),
-    ("2", "purchase_month", "One November only; Feb-Mar late in 2018 (14-19%) but not 2017 (3-5%): marks episodes, not seasons",
-     "Tested last in forward selection; not kept"),
-    ("2", "Time ordering", "A random split lets the model see the same weeks in train and test",
-     "Train on earlier orders, test on the latest 20%, 30-day embargo"),
-    ("1", "seller_id", "Its history uses the target; a fair benchmark would also learn the seller's own overcharging",
-     "Tested with a TargetEncoder inside the Pipeline (train folds only); excluded by design"),
-    ("1", "Items of one order", "Share basket fields and could straddle a split", "Splits and CV grouped by order_id"),
-    ("1", "Same product in train and test", "A forest can memorise a listing's own past freight",
-     "Robustness split grouped by product_id; audit uses unseen products"),
-]
-
 
 def find_data_dir():
     here = os.path.dirname(os.path.abspath(__file__))

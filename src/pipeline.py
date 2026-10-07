@@ -70,31 +70,9 @@ def pick_final(cv, col, sd_col, higher, order):
 
 
 # ------------------------------------------------------------------ documentation tables
-def scoping_checklist(orders):
-    return pd.DataFrame([
-        ["1. Target computable from provided tables, no external data",
-         "freight_value comes from order_items.", "is_late = delivered date vs estimated date from orders (Phase 1 definition)."],
-        ["2. All predictors exist before the outcome (no leakage)",
-         "Listing, address and basket fields fixed at checkout.",
-         "Checkout-time fields only, including the promised date; delivery, carrier, approval and review fields "
-         "excluded."],
-        ["3. EDA shows feature-target relationships",
-         "Phase 1: freight correlates 0.61 / 0.59 / 0.39 with weight / volume / distance.",
-         "Phase 1: strong state gradient (SP 4.5% late vs AL 21.4%); late rate varies 1-19% by month."],
-        ["4. Class imbalance has a mitigation plan", "None needed (continuous target).",
-         f"{orders.clf_target.mean():.1%} late: PR-AUC and its lift as primary metrics, class_weight tuned, "
-         "time-ordered validation, precision / recall / F1 for the riskiest 10% of orders, no-skill baseline shown."],
-        ["5. A real business stakeholder", "Logistics-pricing / finance analyst.", "Operations and customer-experience team."]],
-        columns=["Checklist item", "Problem 1 (freight)", "Problem 2 (is_late)"])
-
-
 def feature_set_table(sets):
     return pd.DataFrame([{"Feature set": k, "Numeric": ", ".join(v["num"]), "Categorical": ", ".join(v["cat"]) or "-",
                           "Target-encoded": ", ".join(v["te"]) or "-"} for k, v in sets.items()])
-
-
-def leakage_table():
-    return pd.DataFrame(F.LEAKAGE_AUDIT, columns=["Problem", "Field / group", "Why it matters", "Treatment"])
 
 
 def split_summary(tr_a, te_a, tr_b, te_b):
@@ -220,7 +198,7 @@ def cv_classification(models, train, fs, k=5, share=F.REVIEW_SHARE):
         shares[name] = share
         f = pd.DataFrame([M.clf_metrics(y.iloc[va], oof[va], pred=M.flag_top_share(oof[va], share))
                           for _, va in folds_idx])
-        rows.append({"Model": name, "Review share": share,
+        rows.append({"Model": name,
                      **{f"{c} mean": f[c].mean() for c in ["Precision", "Recall", "F1", "ROC_AUC", "PR_AUC", "Lift"]},
                      **{f"{c} sd": f[c].std() for c in ["F1", "PR_AUC", "Lift"]}})
     return pd.DataFrame(rows), shares
@@ -253,8 +231,7 @@ def test_classification(fitted, test, fs, shares):
     X, rows = test[cols_for(fs)], []
     for n, m in fitted.items():
         s = M.clf_scores(m, X)
-        rows.append({"Model": n, "Review share": shares[n],
-                     **M.clf_metrics(test.clf_target, s, pred=M.flag_top_share(s, shares[n]))})
+        rows.append({"Model": n, **M.clf_metrics(test.clf_target, s, pred=M.flag_top_share(s, shares[n]))})
     return pd.DataFrame(rows)
 
 
@@ -461,7 +438,8 @@ def ablation_classification(train, k=5):
     Because the folds differ a lot in difficulty, a group is judged by its PAIRED gain in PR-AUC lift over the kept
     set, fold by fold, and kept only if that gain exceeds its fold sd for at least one family. A fixed L2 logistic
     model (C = 0.1) and a fixed, regularised class-weighted forest are used, so the choice does not depend on tuning.
-    Returns the table and the selected feature set.
+    A group rejected before a later group was kept is re-tried once against the final set ("Re-check" rows), so the
+    order of the groups cannot decide the outcome. Returns the table and the selected feature set.
     """
     folds, y = list(M.TimeForwardCV(k).split(train)), train.clf_target
 
@@ -479,10 +457,12 @@ def ablation_classification(train, k=5):
     kept, best = F.LATE_BASE, score(F.LATE_BASE)
     rows = [{"Feature set": "Promise only (start)", "Kept": "start",
              **{f"{l} {c}": v for l in best for c, v in [("lift", best[l][0].mean()), ("ROC-AUC", best[l][1])]}}]
-    for name, group in F.LATE_GROUPS.items():
+
+    def try_group(label, group):
+        nonlocal kept, best
         cand = merge_sets(kept, group)
         sc = score(cand)
-        r = {"Feature set": f"+ {name}"}
+        r = {"Feature set": label}
         for l in sc:
             d = sc[l][0] - best[l][0]
             r.update({f"{l} lift": sc[l][0].mean(), f"{l} gain": d.mean(), f"{l} gain sd": d.std(ddof=1),
@@ -491,6 +471,13 @@ def ablation_classification(train, k=5):
         if r["Kept"] == "yes":
             kept, best = cand, sc
         rows.append(r)
+
+    for name, group in F.LATE_GROUPS.items():
+        try_group(f"+ {name}", group)
+    last_kept = max([i for i, r in enumerate(rows) if r["Kept"] == "yes"], default=0)
+    for i, (name, group) in enumerate(F.LATE_GROUPS.items(), 1):
+        if rows[i]["Kept"] == "no" and i < last_kept:
+            try_group(f"Re-check: + {name}", group)
     cols = ["Feature set"] + [f"{l} {c}" for l in ["Logit", "RF"] for c in ["lift", "gain", "gain sd", "ROC-AUC"]] + ["Kept"]
     return pd.DataFrame(rows)[cols], kept
 
@@ -567,16 +554,16 @@ def flag_overcharge(test, pred_primary, pred_check, q=0.95):
     return t, stab
 
 
-def audit_summary(flagged):
+def audit_summary(flagged, stab):
     f = flagged[flagged.flag_primary]
     top_sellers = max(1, int(0.05 * flagged.seller_id.nunique()))
     return pd.DataFrame({"metric": ["items flagged", "mean actual freight R$", "mean expected freight R$", "mean excess R$",
                                     "excess as % of all test freight", "flagged items from top 5% of sellers (by flag count)",
-                                    "flagged by both forest and Ridge (%)"],
+                                    "flagged by both forest and Ridge (%)", "agreement of forest and Ridge flags (Jaccard)"],
                          "value": [len(f), f.freight_value.mean(), f.expected_rs.mean(), f.excess_rs.mean(),
                                    f.excess_rs.sum() / flagged.freight_value.sum() * 100,
                                    f.groupby("seller_id").size().sort_values(ascending=False).head(top_sellers).sum() / len(f) * 100,
-                                   (f.flag_check.mean()) * 100]})
+                                   (f.flag_check.mean()) * 100, stab["jaccard"]]})
 
 
 def audit_review_sheet(flagged, n=30):

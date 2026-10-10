@@ -241,3 +241,9 @@ data/*
 !deployment/data/*.csv
 !deployment/data/*.geojson
 !deployment/data/*.json
+
+# Reports, summaries, generated outputs and local tools in docs/ are kept local (not shared on GitHub), as are the
+# report builder and the old headless run script
+docs/
+scripts/build_report.py
+scripts/run_phase2.py

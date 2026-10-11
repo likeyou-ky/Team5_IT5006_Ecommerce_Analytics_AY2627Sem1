@@ -565,6 +565,22 @@ def audit_summary(flagged, stab):
                                    f.groupby("seller_id").size().sort_values(ascending=False).head(top_sellers).sum() / len(f) * 100,
                                    (f.flag_check.mean()) * 100, stab["jaccard"]]})
 
+def audit_concentration(flagged):
+    """Seller concentration, markup and flag rate by price band for the unusual-freight audit."""
+    f = flagged[flagged.flag_primary]
+    k = max(1, int(0.05 * flagged.seller_id.nunique()))
+    by_flags = f.seller_id.value_counts().head(k).index
+    by_items = flagged.seller_id.value_counts().head(k).index
+    summary = pd.DataFrame({"metric": ["median markup (actual / expected)",
+                                       "top 5% sellers by flags: % of flags", "top 5% sellers by flags: % of items",
+                                       "top 5% sellers by items: % of items", "top 5% sellers by items: % of flags"],
+                            "value": [(f.freight_value / f.expected_rs).median(),
+                                      f.seller_id.isin(by_flags).mean() * 100, flagged.seller_id.isin(by_flags).mean() * 100,
+                                      flagged.seller_id.isin(by_items).mean() * 100, f.seller_id.isin(by_items).mean() * 100]})
+    band = pd.cut(flagged.price, [0, 50, 100, 200, 500, np.inf], right=False,
+                  labels=["<50", "50–100", "100–200", "200–500", "500+"])
+    by_band = flagged.groupby(band, observed=True).flag_primary.agg(flag_rate="mean", n="size")
+    return summary, by_band
 
 def audit_review_sheet(flagged, n=30):
     """Top-n flagged cases with the context a reviewer needs (for manual precision-at-k checks).

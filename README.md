@@ -6,7 +6,7 @@ a **regression** task (what freight *should* an item be charged, from weight, si
 
 **Repository:** https://github.com/likeyou-ky/Team5_IT5006_Ecommerce_Analytics_AY2627Sem1
 
-**Live dashboard:** https://team5-olist-eda-phase1.streamlit.app/
+**Live EDA dashboard (Phase 1):** https://team5-olist-eda-phase1.streamlit.app/
 
 ## Repository structure
 
@@ -18,8 +18,10 @@ project-root/
 │   ├── Team5_Phase2_IT5006_AY2627Sem1.ipynb   modelling and evaluation — the Phase 2 deliverable
 │   └── draft/individual/                       each member's working notebooks
 ├── src/             reusable modules: features.py, models.py, pipeline.py, plots.py, olist_theme.py
-├── deployment/      Streamlit dashboard (app.py, gen_dashboard_data.py, data/ aggregates)
-├── docs/            local only, not versioned: reports, EDA summaries, Phase 2 tables and figures
+├── deployment/
+│   ├── app.py, gen_dashboard_data.py, data/   Phase 1 EDA dashboard
+│   └── model_app/                              Phase 3 model app: app.py, build_models.py, models/, data/
+├── docs/            reports and slides, kept local (only docs/README.md is versioned)
 ├── requirements.txt
 └── README.md
 ```
@@ -104,10 +106,32 @@ OLIST_DATA_DIR=/path/to/Olist_CSV python deployment/gen_dashboard_data.py
 
 See `deployment/README.md` for more detail.
 
+## Phase 3 — model app
+
+`deployment/model_app/` deploys the two Phase 2 final models as a Streamlit app with two tools:
+
+- **Fair-freight checker** (Problem 1, RandomForest): checks a held-out item's freight against the fair freight,
+  prices a new listing, or audits a batch of items (all held-out items or an uploaded CSV) for unusual freight.
+- **Late-delivery risk queue** (Problem 2, plain LogisticRegression): ranks one day's orders by risk, marks the riskiest
+  share for checking, and can reveal what really happened; it also scores an order you describe.
+
+The Olist data end in 2018, so the app scores held-out historical records (the Problem 1 test items and the Problem 2
+test window, 26 May – 29 Aug 2018) as if they were new orders. To run it locally:
+
+```bash
+pip install -r deployment/model_app/requirements.txt
+streamlit run deployment/model_app/app.py
+```
+
+`deployment/model_app/build_models.py` rebuilds the model files and data from the raw CSVs with the code in `src/`
+and stops if a result drifts from the Phase 2 notebook. See `deployment/model_app/README.md` for the pages, files and
+Streamlit Cloud settings.
+
 ## Tools
 
 The analysis and modelling use Python with pandas, NumPy, scikit-learn and matplotlib / seaborn.
-The dashboard uses Streamlit and Plotly. All dependencies are pinned in `requirements.txt`.
+The dashboard and the model app use Streamlit and Plotly. `requirements.txt` gives minimum versions; the model app's
+own `requirements.txt` pins the libraries that load its saved models.
 
 ## Reproducibility
 

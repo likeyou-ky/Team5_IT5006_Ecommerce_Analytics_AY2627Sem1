@@ -1,0 +1,9 @@
+# Model app dependencies (Streamlit Cloud reads this file because it sits next to app.py).
+# scikit-learn, numpy, pandas and joblib are pinned to the versions that built models/*.joblib (see data/facts.json):
+# a saved model must be loaded with the library versions that wrote it. Choose Python 3.12 or 3.13 on Streamlit Cloud.
+streamlit>=1.50
+plotly>=5.18
+scikit-learn==1.8.0
+numpy==2.4.2
+pandas==2.3.3
+joblib==1.5.3

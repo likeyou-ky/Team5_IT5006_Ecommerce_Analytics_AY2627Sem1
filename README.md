@@ -108,12 +108,16 @@ See `deployment/README.md` for more detail.
 
 ## Phase 3 — model app
 
-`deployment/model_app/` deploys the two Phase 2 final models as a Streamlit app with two tools:
+`deployment/model_app/` deploys the Phase 2 final models as a Streamlit app organised around the two stakeholders:
 
-- **Fair-freight checker** (Problem 1, RandomForest): checks a held-out item's freight against the fair freight,
-  prices a new listing, or audits a batch of items (all held-out items or an uploaded CSV) for unusual freight.
-- **Late-delivery risk queue** (Problem 2, plain LogisticRegression): ranks one day's orders by risk, marks the riskiest
-  share for checking, and can reveal what really happened; it also scores an order you describe.
+- **Logistics-pricing / finance analyst** (Problem 1, RandomForest with Ridge as a second opinion): a monthly
+  *Freight audit* (sellers ranked by flag rate, items flagged by both models first, held-out items or an uploaded CSV),
+  *Check a charge* (one charge, or a quote range for a new listing) and a *Tariff review* (where a simple published
+  tariff misprices freight by distance and weight).
+- **Operations and customer-experience team** (Problem 2, plain LogisticRegression): a *Daily risk queue* (the day's
+  riskiest orders with a suggested low-cost follow-up, the promise that would have kept each off the list, and the
+  real outcomes on request), a *Promise check* for new orders at checkout, and *Monitoring* of promise changes and
+  model skill week by week.
 
 The Olist data end in 2018, so the app scores held-out historical records (the Problem 1 test items and the Problem 2
 test window, 26 May – 29 Aug 2018) as if they were new orders. To run it locally:

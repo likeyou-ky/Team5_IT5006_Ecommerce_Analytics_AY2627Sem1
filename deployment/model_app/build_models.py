@@ -7,10 +7,16 @@ training splits (notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb, Sections 4-8):
 
 * Problem 1, fair freight: RandomForest regressor on log1p(freight), order-grouped 80% training split, with the
   tuned settings of Section 6 and 200 trees: the exact final model (141 MB in memory, about 48 MB compressed).
+  The tuned Ridge model is the audit's second opinion, as in Section 11: items flagged by both models come first.
 * Problem 2, late delivery: plain LogisticRegression on the time-ordered training split (orders up to 26 Apr 2018).
+
+Unusual freight = residual in the top 5% of the test set, either overall (the notebook's rule) or within each price
+band (the report's recommendation, so expensive items do not crowd the review list). Both cut-offs are stored for
+both models.
 
 Writes into deployment/model_app/:
   models/freight_forest.joblib   the Problem 1 forest
+  models/freight_ridge.joblib    the Problem 1 Ridge model (second opinion for the audit)
   models/late_logit.joblib       the Problem 2 logistic model
   data/heldout_items.csv         Problem 1 test items (their orders were never seen in training)
   data/heldout_orders.csv        Problem 2 test window, 26 May - 29 Aug 2018, with outcomes for the after-the-fact check
@@ -40,6 +46,7 @@ os.makedirs(DATA, exist_ok=True)
 
 RF_PARAMS = dict(min_samples_leaf=2, max_features=0.33, max_depth=16,  # notebook Section 6, tuning table
                  n_estimators=200)                                     # as in pipeline.final_reg_models
+RIDGE_ALPHA = 10                                                       # notebook Section 6, tuning table
 FLAG_Q = 0.95                       # unusual freight = top 5% of residuals (notebook Section 11)
 # Identical units of one listing in one order share a residual, and the cut-off can land on such a tie. The forest's
 # parallel predictions vary in the last bits between calls (about 1e-13), which would flip the tied items, so the
@@ -47,6 +54,22 @@ FLAG_Q = 0.95                       # unusual freight = top 5% of residuals (not
 FLAG_TOL = 1e-9
 SHARE = F.REVIEW_SHARE              # review the riskiest 10% of orders (notebook Section 4)
 PRICE_BANDS = ([0, 25, 50, 100, 200, 500, np.inf], ["<25", "25-50", "50-100", "100-200", "200-500", "500+"])
+AUDIT_BANDS = ([0, 50, 100, 200, 500, np.inf], ["<50", "50-100", "100-200", "200-500", "500+"])  # pipeline.audit_concentration
+
+
+def residual(freight, pred_log):
+    """Unusual-freight residual exactly as app.py computes it: log(1 + charged) - log(1 + expected)."""
+    return np.log1p(np.asarray(freight)) - np.log1p(np.clip(np.expm1(pred_log), 0, None))
+
+
+def audit_band(price):
+    return pd.cut(price, AUDIT_BANDS[0], labels=AUDIT_BANDS[1], right=False).astype(str).values
+
+
+def unusual(res, band, cut, rule):
+    """Flag residuals at or above the cut-off: one cut-off overall, or one per price band."""
+    thr = cut["overall"] if rule == "overall" else pd.Series(band).map(cut["band"]).values.astype(float)
+    return res >= thr - FLAG_TOL
 
 d = F.find_data_dir()
 print("Reading raw data from:", d)
@@ -72,8 +95,17 @@ pred_a = forest.predict(te_a[cols_a])
 reg_test = M.reg_metrics(te_a.reg_target, pred_a)
 print(f"Problem 1 test MAE: R${reg_test['MAE_rs']:.3f}")
 
-resid = te_a.reg_target - pred_a
-flag_thr = float(resid.quantile(FLAG_Q))                  # on the log1p scale: (freight + 1) / (expected + 1)
+ridge = M.reg_estimators(fs_a, ridge_alpha=RIDGE_ALPHA)["Linear: Ridge"].fit(tr_a[cols_a], tr_a.reg_target)
+pred_r = ridge.predict(te_a[cols_a])
+ridge_test = M.reg_metrics(te_a.reg_target, pred_r)
+
+band_a = audit_band(te_a.price)
+cuts, flags = {}, {}
+for name, pred in [("forest", pred_a), ("ridge", pred_r)]:
+    res = residual(te_a.freight_value, pred)
+    cuts[name] = {"overall": float(np.quantile(res, FLAG_Q)),
+                  "band": {b: float(np.quantile(res[band_a == b], FLAG_Q)) for b in AUDIT_BANDS[1]}}
+    flags[name] = {rule: unusual(res, band_a, cuts[name], rule) for rule in ("overall", "band")}
 exp_a = np.clip(np.expm1(pred_a), 0, None)
 band = pd.cut(te_a.price, PRICE_BANDS[0], labels=PRICE_BANDS[1], right=False)
 err = (te_a.freight_value - exp_a).abs()
@@ -94,6 +126,7 @@ for _, idx in te_b.groupby(day).indices.items():
     daily[idx] = M.flag_top_share(score_b[idx], SHARE)
 y_b = te_b.clf_target.values
 gain = P.gain_table(te_b.clf_target, score_b)
+by_month = P.test_by_month(logit, te_b, fs_b)             # skill falls as the promise rules change (Section 10)
 
 # ============================ data files for the app ============================
 low = F.load_low_reviews(d).set_index("order_id").low
@@ -105,8 +138,9 @@ held_orders = te_b[ORDER_COLS + [c for c in cols_b if c not in ORDER_COLS] + ["c
 held_items.to_csv(os.path.join(DATA, "heldout_items.csv"), index=False)      # full precision: the app must
 held_orders.to_csv(os.path.join(DATA, "heldout_orders.csv"), index=False)    # reproduce these scores exactly
 back = pd.read_csv(os.path.join(DATA, "heldout_items.csv"))                   # re-scored as app.py does
-back_exp = np.clip(np.expm1(forest.predict(back[cols_a])), 0, None)
-app_flags = int((np.log1p(back.freight_value) - np.log1p(back_exp) >= flag_thr - FLAG_TOL).sum())
+app_flags = {(name, rule): int(unusual(residual(back.freight_value, m.predict(back[cols_a])), audit_band(back.price),
+                                       cuts[name], rule).sum())
+             for name, m in [("forest", forest), ("ridge", ridge)] for rule in ("overall", "band")}
 
 geo = pd.read_csv(os.path.join(d, "olist_geolocation_dataset.csv"))
 geo = geo[geo.geolocation_lat.between(*F.BR_LAT) & geo.geolocation_lng.between(*F.BR_LON)]
@@ -118,6 +152,7 @@ zips.to_csv(os.path.join(DATA, "zip_centroids.csv"), index=False, float_format="
 state_cen = zips.groupby("state")[["lat", "lng"]].median().round(4)
 
 joblib.dump(forest, os.path.join(MODELS, "freight_forest.joblib"), compress=3)
+joblib.dump(ridge, os.path.join(MODELS, "freight_ridge.joblib"), compress=3)
 joblib.dump(logit, os.path.join(MODELS, "late_logit.joblib"), compress=3)
 
 # ============================ facts.json ============================
@@ -136,8 +171,13 @@ facts = {
         "forest_params": RF_PARAMS,
         "test": {**{k: r(reg_test[k]) for k in ["MAE_rs", "RMSE_rs", "R2_rs"]},
                  "MAE_pct": r(reg_test["MAE_rs"] / te_a.freight_value.mean() * 100, 1)},
-        "flag_q": FLAG_Q, "flag_log_resid": flag_thr, "flag_tol": FLAG_TOL,   # unrounded: a cut-off
-        "flag_ratio": r(np.exp(flag_thr), 3), "flagged_test": int((resid >= flag_thr - FLAG_TOL).sum()),
+        "ridge_alpha": RIDGE_ALPHA, "ridge_test": {k: r(ridge_test[k]) for k in ["MAE_rs", "RMSE_rs", "R2_rs"]},
+        # unusual-freight cut-offs on the log1p residual, unrounded (they are thresholds)
+        "flag": {"q": FLAG_Q, "tol": FLAG_TOL, "band_edges": AUDIT_BANDS[0][1:-1], "band_labels": AUDIT_BANDS[1],
+                 "cuts": cuts, "ratio_overall": r(np.exp(cuts["forest"]["overall"]), 3),
+                 "n_unusual": {rule: int(flags["forest"][rule].sum()) for rule in ("overall", "band")},
+                 "both_share": {rule: r((flags["forest"][rule] & flags["ridge"][rule]).sum()
+                                        / flags["forest"][rule].sum()) for rule in ("overall", "band")}},
         "price_bands": [{"band": b, "n": int(g.n), "mae": r(g.mae, 2), "mae_pct": r(g.mae / g.mean_freight * 100, 1)}
                         for b, g in by_band.iterrows()],
         "tariff": dict(zip(["base", "per_kg", "per_100km", "same_state", "mae"], [r(v) for v in tariff])),
@@ -157,6 +197,8 @@ facts = {
         "daily": {"flagged": int(daily.sum()), "precision": r((daily & y_b).sum() / daily.sum()),
                   "recall": r((daily & y_b).sum() / y_b.sum()), "late_caught": int((daily & y_b).sum())},
         "gain": gain[["decile", "orders", "late", "cum_capture", "lift"]].round(3).to_dict("records"),
+        "by_month": [{"month": m.Month, "orders": int(m.Orders), "late_rate": r(m["Late rate"], 4), "lift": r(m.Lift, 2),
+                      "roc_auc": r(m["ROC-AUC"])} for _, m in by_month.iterrows()],
         "score_pct": [r(v, 5) for v in np.quantile(score_b, np.linspace(0, 1, 101))],
         "ranges": {c: [r(tr_b[c].quantile(0.001), 2), r(tr_b[c].quantile(0.999), 2)]
                    for c in ["promised_days", "price_total", "freight_total", "distance_km"]},
@@ -192,7 +234,12 @@ NB = {
     "logit test lift": (clf_test["Lift"], 1.998, 0.001), "logit test PR-AUC": (clf_test["PR_AUC"], 0.070, 0.001),
     "logit test ROC-AUC": (clf_test["ROC_AUC"], 0.672, 0.001), "logit recall@10%": (clf_test["Recall"], 0.228, 0.001),
     "logit precision@10%": (clf_test["Precision"], 0.080, 0.001), "logit late caught": ((flags_b & y_b).sum(), 154, 0),
-    "unusual items, app (from the CSV) vs build": (app_flags, int((resid >= flag_thr - FLAG_TOL).sum()), 0),
+    "Ridge test MAE": (ridge_test["MAE_rs"], 4.738, 0.001), "Ridge test R2": (ridge_test["R2_rs"], 0.517, 0.001),
+    **{f"logit lift {m}": (by_month.set_index("Month").Lift[m], v, 0.002)
+       for m, v in [("2018-05", 10.716), ("2018-06", 6.356), ("2018-07", 2.419), ("2018-08", 1.176)]},
+    # the app must reproduce every unusual-freight count when it re-scores the CSV it reads
+    **{f"unusual items ({name}, {rule}), app vs build": (app_flags[name, rule], int(flags[name][rule].sum()), 0)
+       for name in ("forest", "ridge") for rule in ("overall", "band")},
 }
 fail = [(k, round(float(c), 4), v) for k, (c, v, tol) in NB.items() if abs(c - v) > tol + 1e-9]
 if fail:

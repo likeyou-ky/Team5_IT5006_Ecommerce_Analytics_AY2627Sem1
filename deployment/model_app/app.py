@@ -2,9 +2,11 @@
 """
 Olist logistics assistant: the Phase 3 model app (Team 5, IT5006).
 
-Deploys the two Phase 2 final models (notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb), one tool set per stakeholder:
+Deploys the two final models, one tool set per stakeholder: Problem 1 from notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb
+(re-evaluated on a time-ordered split), Problem 2 from notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb.
 
-  Logistics-pricing / finance analyst (Problem 1, fair freight; RandomForest, with Ridge as the audit's second opinion)
+  Logistics-pricing / finance analyst (Problem 1, fair freight; RandomForest on a time-ordered split, with Ridge as
+  the audit's second opinion)
     Freight audit   which sellers and items to audit this month
     Check a charge  is one charge fair; what should a new listing be quoted
     Tariff review   where a simple published tariff over- or under-charges
@@ -13,10 +15,11 @@ Deploys the two Phase 2 final models (notebooks/Team5_Phase2_IT5006_AY2627Sem1.i
     Promise check     how risky a new order is, and what promise would keep it off the review list
     Monitoring        when a change in the promise rules means the model needs a review
 
-The model files and data are written by build_models.py, which checks them against the notebook; every headline
+The model files and data are written by build_models.py, which checks them against the notebooks; every headline
 number on these pages is read from data/facts.json. The Olist data end in 2018, so the app scores held-out
-historical records as if they were new orders: the freight items come from the Problem 1 test set and the orders
-from the Problem 2 test window (26 May - 29 Aug 2018), none of which the models saw in training.
+historical records as if they were new orders: the freight items come from the Problem 1 test set (the latest 20% of
+items, 24 May - 3 Sep 2018) and the orders from the Problem 2 test window (26 May - 29 Aug 2018), none of which the
+models saw in training.
 
 Run locally:   streamlit run deployment/model_app/app.py
 """
@@ -54,7 +57,7 @@ DRIVER_GROUP = {"promised_days": "promise", "distance_km": "route", "same_state"
                 "n_items": "order", "n_sellers": "order"}
 ACTIONS = {"promise": "Update the delivery estimate", "route": "Check carrier tracking",
            "order": "Confirm dispatch with seller", None: "Send a tracking update"}
-RULES = {"overall": "Top 5% overall (Phase 2 notebook)", "band": "Top 5% within each price band (report)"}
+RULES = {"overall": "Top 5% overall (notebook rule)", "band": "Top 5% within each price band (report)"}
 
 
 # ------------------------------------------------------------------ loading (cached, with a clear failure message)
@@ -74,7 +77,7 @@ def load_data():
 
 
 try:
-    FOREST, RIDGE, LOGIT = load_models()
+    MODEL, RIDGE, LOGIT = load_models()
     FACTS, ITEMS, ORDERS, ZIPS = load_data()
 except Exception as exc:                                                    # missing or unreadable files
     st.error("The app could not load its model or data files. Rebuild them with "
@@ -85,7 +88,9 @@ except Exception as exc:                                                    # mi
 
 P1, P2, NB = FACTS["p1"], FACTS["p2"], FACTS["notebook"]
 FLAG = P1["flag"]
-COLS_A, COLS_B = list(FOREST.feature_names_in_), list(LOGIT.feature_names_in_)
+COLS_A, COLS_B = list(MODEL.feature_names_in_), list(LOGIT.feature_names_in_)
+USES_LISTING = "photos_qty" in COLS_A           # listing details and purchase time: inputs only if the model kept them
+USES_TIMING = "purchase_month" in COLS_A
 STATES = P1["states"]
 DAILY_YIELD = 1 / P2["daily"]["precision"]          # flagged orders checked per late order found, daily 10% list
 
@@ -196,7 +201,7 @@ def audit_band(price):
 
 
 def unusual(charged, expected, price, model, rule):
-    """Unusual freight: log residual at or above the cut-off of `model` (forest or ridge) under `rule`."""
+    """Unusual freight: log residual at or above the cut-off of `model` ("model" = the forest, or "ridge")."""
     cut = FLAG["cuts"][model]
     thr = cut["overall"] if rule == "overall" else pd.Series(audit_band(price)).map(cut["band"]).values.astype(float)
     res = np.log1p(np.atleast_1d(charged).astype(float)) - np.log1p(np.atleast_1d(expected).astype(float))
@@ -218,8 +223,8 @@ def add_scores(d, rule):
     """Fair freight from both models, the unusual flags under `rule`, and the audit columns."""
     d = d.copy()
     if "expected" not in d:
-        d["expected"], d["expected_ridge"] = predict(FOREST, d), predict(RIDGE, d)
-    d["unusual"] = unusual(d.freight_value, d.expected, d.price, "forest", rule)
+        d["expected"], d["expected_ridge"] = predict(MODEL, d), predict(RIDGE, d)
+    d["unusual"] = unusual(d.freight_value, d.expected, d.price, "model", rule)
     d["unusual_ridge"] = unusual(d.freight_value, d.expected_ridge, d.price, "ridge", rule)
     d["both"] = d.unusual & d.unusual_ridge
     d["excess"] = d.freight_value - d.expected
@@ -230,7 +235,7 @@ def add_scores(d, rule):
 
 @st.cache_data(show_spinner="Scoring the held-out items...")
 def heldout_predictions():
-    return ITEMS.assign(expected=predict(FOREST, ITEMS), expected_ridge=predict(RIDGE, ITEMS))
+    return ITEMS.assign(expected=predict(MODEL, ITEMS), expected_ridge=predict(RIDGE, ITEMS))
 
 
 @st.cache_data(show_spinner=False)
@@ -243,8 +248,8 @@ def rule_picker():
     keys = list(RULES)
     choice = st.radio("Unusual-freight rule", keys, index=keys.index(st.session_state.get("rule", "overall")),
                       format_func=RULES.get, horizontal=True,
-                      help="Overall: the 5% of items with the largest charge above fair freight, as in the Phase 2 "
-                           "notebook. Within each price band: 5% of every band, as the report recommends, so expensive "
+                      help="Overall: the 5% of items with the largest charge above fair freight, as in the "
+                           "notebooks. Within each price band: 5% of every band, as the report recommends, so expensive "
                            "items (harder to predict) do not crowd the review list.")
     st.session_state.rule = choice
     return choice
@@ -362,7 +367,7 @@ def promise_section(row, line, measure, line_label, title):
 def home():
     st.title("Olist logistics assistant")
     st.markdown(
-        "Decision tools for the two teams our project serves, each built on the final model of one Phase 2 problem. "
+        "Decision tools for the two teams our project serves, each built on the final model of one of our two problems. "
         "The Olist data end in 2018, so the tools score **held-out historical records as if they were new**: freight "
         "items and orders the models never saw in training.")
     a, b = st.columns(2, gap="large")
@@ -371,7 +376,8 @@ def home():
         st.markdown(
             "**Question:** what freight *should* an item cost, and which charges and sellers need an audit?\n\n"
             f"**Model:** a random forest predicts fair freight to within {md_money(P1['test']['MAE_rs'])} on average "
-            f"({P1['test']['MAE_pct']}% of mean freight); a Ridge model gives a second opinion on unusual charges.")
+            f"for items bought after its training data ({P1['test']['MAE_pct']}% of mean freight); a Ridge model gives "
+            f"a second opinion on unusual charges.")
         st.markdown(
             "| When | Decision | Page |\n|---|---|---|\n"
             "| Monthly | Which sellers and items to audit | Freight audit |\n"
@@ -476,8 +482,8 @@ def audit_page():
         "A flag is a reason to look, not proof of overcharging: fragile goods, data errors or cost recovery can also "
         "explain a high charge.")
     tmpl_cols = ["order_id", "seller_id", "category", "price", "freight_value", "weight_kg", "volume_cm3",
-                 "distance_km", "seller_state", "customer_state", "n_items", "n_sellers", "photos_qty", "name_len",
-                 "desc_len", "purchase_month", "purchase_dow", "purchase_hour"]
+                 "distance_km", "seller_state", "customer_state"]
+    tmpl_cols += [c for c in COLS_A if c not in tmpl_cols + ["chargeable_kg", "same_state", "purchase_ts"]]
     c = st.columns([2, 1])
     src = c[0].radio("Items to audit", ["all held-out items", "upload a CSV"], horizontal=True)
     c[1].download_button("Download the CSV template", ITEMS[tmpl_cols].head(5).to_csv(index=False),
@@ -511,9 +517,9 @@ def audit_page():
     st.markdown(f"Unusual items were charged **{md_money(f.freight_value.mean())}** on average, against a fair "
                 f"freight of **{md_money(f.expected.mean())}**.")
     if src == "all held-out items":
-        st.caption(f"These are the order-grouped test items. The Phase 2 report's audit used listings the model had "
-                   f"never seen ({NB['audit_flags']:,} items charged {md_money(NB['audit_charged'], 1)} against "
-                   f"{md_money(NB['audit_expected'], 1)} expected), so its counts differ slightly.")
+        st.caption(f"These are the latest 20% of items (purchased {P1['test_dates'][0]} to {P1['test_dates'][1]}), "
+                   f"scored by models trained only on earlier items, as a monthly audit would run. Freight rose over "
+                   f"time, so the cut-off is relative to the items audited.")
 
     st.subheader("1 · Sellers to audit")
     g = (d.assign(excess_u=np.where(d.unusual, d.excess, 0.0), markup_u=d.markup.where(d.unusual))
@@ -613,11 +619,11 @@ def verdict(charged, expected, expected_ridge, price, rule):
     c[2].metric("Difference", money(charged - expected),
                 f"{(charged / expected - 1) * 100:+.0f}%" if expected > 0 else None, delta_color="inverse")
     c[3].metric(f"Typical error at R$ {band['band']}", f"± {money(band['mae'])}")
-    forest_flag = bool(unusual(charged, expected, price, "forest", rule)[0])
+    model_flag = bool(unusual(charged, expected, price, "model", rule)[0])
     ridge_flag = bool(unusual(charged, expected_ridge, price, "ridge", rule)[0])
-    second = (f"The Ridge model agrees (it expects {md_money(expected_ridge)})." if ridge_flag == forest_flag else
+    second = (f"The Ridge model agrees (it expects {md_money(expected_ridge)})." if ridge_flag == model_flag else
               f"The Ridge model disagrees (it expects {md_money(expected_ridge)}).")
-    if forest_flag:
+    if model_flag:
         st.error(f"🚩 **Unusual freight:** {md_money(charged)} is in the top 5% above the fair freight of "
                  f"{md_money(expected)}. {second} " + ("Review it first." if ridge_flag else "Review it after the "
                                                                                              "items both models flag."))
@@ -662,12 +668,14 @@ def check_item(rule):
     st.caption(f"A simple published tariff would charge "
                f"{md_money(float(tariff(it.chargeable_kg, it.distance_km, it.same_state)))}; it errs by "
                f"{md_money(P1['tariff']['mae'])} on average, against {md_money(P1['test']['MAE_rs'])} for the forest.")
-    info = pd.DataFrame({"Input": ["Price", "Weight", "Volume", "Chargeable weight", "Route", "Distance",
-                                   "Items / sellers in the order", "Photos, name and description length"],
-                         "Value": [money(it.price), f"{it.weight_kg:,.2f} kg", f"{it.volume_cm3:,.0f} cm³",
-                                   f"{it.chargeable_kg:,.2f} kg", f"{it.seller_state} → {it.customer_state}",
-                                   f"{it.distance_km:,.0f} km", f"{it.n_items} / {it.n_sellers}",
-                                   f"{it.photos_qty:.0f}, {it.name_len:.0f}, {it.desc_len:.0f} characters"]})
+    rows = [("Price", money(it.price)), ("Weight", f"{it.weight_kg:,.2f} kg"), ("Volume", f"{it.volume_cm3:,.0f} cm³"),
+            ("Chargeable weight", f"{it.chargeable_kg:,.2f} kg"), ("Route", f"{it.seller_state} → {it.customer_state}"),
+            ("Distance", f"{it.distance_km:,.0f} km"), ("Category", it.category),
+            ("Items / sellers in the order", f"{it.n_items} / {it.n_sellers}")]
+    if USES_LISTING:
+        rows.append(("Photos, name and description length",
+                     f"{it.photos_qty:.0f}, {it.name_len:.0f}, {it.desc_len:.0f} characters"))
+    info = pd.DataFrame(rows, columns=["Input", "Value"])
     st.dataframe(info, hide_index=True, width="stretch")
 
 
@@ -690,15 +698,18 @@ def quote_listing(rule):
             e1, e2 = st.columns(2)
             n_items = e1.number_input("Items in the order", min_value=1, value=1)
             n_sellers = e2.number_input("Sellers in the order", min_value=1, value=1)
-            w1, w2 = st.columns(2)
-            day = w1.date_input("Purchase date", value=pd.Timestamp("2018-08-01"))
-            hour = w2.slider("Purchase hour", 0, 23, 14)
-        with st.expander("Listing details (training medians by default)"):
-            l1, l2, l3 = st.columns(3)
-            photos = l1.number_input("Photos", min_value=0, value=int(P1["defaults"]["photos_qty"]))
-            name_len = l2.number_input("Name length (characters)", min_value=0, value=int(P1["defaults"]["name_len"]))
-            desc_len = l3.number_input("Description length (characters)", min_value=0,
-                                       value=int(P1["defaults"]["desc_len"]))
+            day, hour = pd.Timestamp("2018-08-01"), 14
+            if USES_TIMING:
+                w1, w2 = st.columns(2)
+                day = w1.date_input("Purchase date", value=day)
+                hour = w2.slider("Purchase hour", 0, 23, hour)
+        photos, name_len, desc_len = (int(P1["defaults"][c]) for c in ("photos_qty", "name_len", "desc_len"))
+        if USES_LISTING:
+            with st.expander("Listing details (training medians by default)"):
+                l1, l2, l3 = st.columns(3)
+                photos = l1.number_input("Photos", min_value=0, value=photos)
+                name_len = l2.number_input("Name length (characters)", min_value=0, value=name_len)
+                desc_len = l3.number_input("Description length (characters)", min_value=0, value=desc_len)
         charged = st.number_input("Freight charged (R$, optional: leave 0 to skip the check)", min_value=0.0, value=0.0)
         go_ = st.form_submit_button("Estimate", type="primary")
     if not go_:
@@ -718,7 +729,7 @@ def quote_listing(rule):
                              purchase_dow=when.dayofweek, purchase_hour=when.hour, seller_state=s_loc[2],
                              customer_state=c_loc[2], category=cat, order_id="new", purchase_ts=when.timestamp())])
     range_note({"weight_kg": wkg, "volume_cm3": vol, "price": price, "distance_km": row.distance_km[0]}, P1["ranges"])
-    expected, expected_ridge = float(predict(FOREST, row)[0]), float(predict(RIDGE, row)[0])
+    expected, expected_ridge = float(predict(MODEL, row)[0]), float(predict(RIDGE, row)[0])
     band = error_band(price)
     st.markdown(f"**{cat}**, {wkg:,.2f} kg, {vol:,.0f} cm³, {s_loc[2]} → {c_loc[2]} ({row.distance_km[0]:,.0f} km)")
     c = st.columns(3)
@@ -729,7 +740,7 @@ def quote_listing(rule):
     if charged > 0:
         verdict(charged, expected, expected_ridge, price, rule)
     st.caption(f"For a listing the model has never seen, the average error is {md_money(NB['p1_unseen_mae'])} "
-               f"({NB['p1_unseen_pct']}% of mean freight; Phase 2 notebook, Section 11).")
+               f"({NB['p1_unseen_pct']}% of their mean freight; Phase 3 notebook, Section 6).")
 
 
 # ------------------------------------------------------------------ Analyst: tariff review
@@ -1021,8 +1032,8 @@ def monitor_page():
 def model_card():
     st.title("📋 Model card")
     st.markdown("What each model was trained on, how it was validated and where it should not be trusted. Test "
-                "results are recomputed by `build_models.py` from the files this app loads; robustness results are "
-                "quoted from the Phase 2 notebook.")
+                "results are recomputed by `build_models.py` from the files this app loads; cross-validation and robustness "
+                "results are quoted from the notebooks (Problem 1: Phase 3; Problem 2: Phase 2).")
     a, b = st.columns(2, gap="large")
     with a:
         st.subheader("Problem 1 · Fair freight")
@@ -1032,18 +1043,23 @@ def model_card():
             f"review tariffs.\n"
             f"- **Model:** random forest regressor on log(1 + freight), {P1['forest_params']['n_estimators']} trees, "
             f"leaf size {P1['forest_params']['min_samples_leaf']}, depth {P1['forest_params']['max_depth']}, "
-            f"{P1['forest_params']['max_features']:.0%} of features per split; tuned by grouped cross-validation. "
-            f"Second opinion: Ridge (alpha {P1['ridge_alpha']}), test MAE {md_money(P1['ridge_test']['MAE_rs'])}.\n"
+            f"{P1['forest_params']['max_features']:.0%} of features per split; feature groups, settings and model "
+            f"chosen by forward-chaining cross-validation. Second opinion: Ridge (alpha {P1['ridge_alpha']}), test MAE "
+            f"{md_money(P1['ridge_test']['MAE_rs'])}.\n"
             f"- **Inputs:** weight, volume, chargeable weight, distance, same-state route, seller and customer "
-            f"state, category, price, basket size, listing details and purchase timing. Seller identity is "
-            f"excluded on purpose, so a seller's habitual overcharging cannot become the benchmark.\n"
-            f"- **Data:** {P1['n_train']:,} training items; {P1['n_test']:,} test items whose orders were never seen "
-            f"in training (80/20 split grouped by order).\n"
+            f"state, category, price and basket size"
+            f"{', listing details and purchase timing' if USES_LISTING else ''}. Seller identity is excluded on "
+            f"purpose, so a seller's habitual overcharging cannot become the benchmark"
+            f"{'' if USES_LISTING else '; listing details and purchase timing did not help on later periods'}.\n"
+            f"- **Data:** trained on the {P1['n_train']:,} items bought from {P1['train_dates'][0]} to "
+            f"{P1['train_dates'][1]}; tested on the {P1['n_test']:,} items bought from {P1['test_dates'][0]} to "
+            f"{P1['test_dates'][1]} (the latest 20%).\n"
             f"- **Test results:** MAE {md_money(P1['test']['MAE_rs'])} ({P1['test']['MAE_pct']}% of mean freight "
             f"{md_money(P1['mean_freight_test'])}), RMSE {md_money(P1['test']['RMSE_rs'])}, R² {P1['test']['R2_rs']:.3f}. "
-            f"Cross-validated MAE {md_money(NB['p1_cv_mae'])} ± {NB['p1_cv_mae_sd']:.2f}. Baselines: Ridge "
-            f"{md_money(NB['p1_ridge_test_mae'])}, single tree {md_money(NB['p1_tree_test_mae'])}, transparent "
-            f"tariff {md_money(P1['tariff']['mae'])}.\n"
+            f"Cross-validated MAE {md_money(NB['p1_cv_mae'])} ± {NB['p1_cv_mae_sd']:.2f} (the spread is mostly the "
+            f"freight level of each period). Alternatives on the same test items: stacking "
+            f"with Ridge {md_money(NB['p1_stack_test_mae'])} (no better fold by fold), Ridge {md_money(NB['p1_ridge_test_mae'])}, single tree "
+            f"{md_money(NB['p1_tree_test_mae'])}, transparent tariff {md_money(P1['tariff']['mae'])}.\n"
             f"- **Unusual-freight rule:** residual in the top {1 - fl['q']:.0%} of the test set, overall "
             f"({fl['n_unusual']['overall']:,} items; Ridge agrees on {fl['both_share']['overall']:.0%}) or within each "
             f"price band ({fl['n_unusual']['band']:,} items; {fl['both_share']['band']:.0%}).")
@@ -1054,11 +1070,11 @@ def model_card():
             "mae": st.column_config.NumberColumn("MAE", format="R$ %.2f"),
             "mae_pct": st.column_config.NumberColumn("MAE %", format="percent")})
         st.markdown(
-            f"**Limits.** Listings never seen in training: MAE {md_money(NB['p1_unseen_mae'])} "
-            f"({NB['p1_unseen_pct']}%). Freight per kg rose over time, and on the latest 20% of items the MAE is "
-            f"{md_money(NB['p1_recent_mae'])}: retrain on recent orders before real use. A flag is a reason to look, "
-            f"not proof of overcharging. The report's audit used never-seen listings, the app's audit the main test "
-            f"set, so their counts differ slightly.")
+            f"**Limits.** Freight per kg rose over time, so the error on later items ({P1['test']['MAE_pct']}% of mean "
+            f"freight) misses the 20% target; on a random split, which mixes periods, it would be "
+            f"{md_money(NB['p1_random_mae'])} ({NB['p1_random_pct']}%). Retrain monthly on recent items. Listings never "
+            f"seen in training: MAE {md_money(NB['p1_unseen_mae'])} ({NB['p1_unseen_pct']}%). A flag is a reason to "
+            f"look, not proof of overcharging.")
     with b:
         st.subheader("Problem 2 · Late delivery")
         month_lift = ", ".join(f"{m['lift']:.1f}" for m in P2["by_month"][1:])

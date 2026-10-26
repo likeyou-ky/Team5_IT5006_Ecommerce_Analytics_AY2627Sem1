@@ -1,12 +1,14 @@
-"""Phase 2 experiment steps, called by the Phase 2 notebook.
+"""Experiment steps, called by the Phase 2 and Phase 3 notebooks.
 
 Problem 1 (freight regression) works on the ITEM table; Problem 2 (is_late classification)
 works on the ORDER table. Each function does one step of the workflow and returns tidy
 DataFrames so the notebook can show and save them.
 
 Validation
-* Problem 1: 80/20 hold-out grouped by order_id (stratified on target quintiles), 5-fold grouped CV;
+* Problem 1, Phase 2: 80/20 hold-out grouped by order_id (stratified on target quintiles), 5-fold grouped CV;
      robustness splits grouped by product_id and ordered in time.
+* Problem 1, Phase 3 (primary): time-ordered hold-out (latest 20% of items, no embargo: freight is known at checkout)
+     and 5-fold forward-chaining CV, passed in through the `cv` arguments below.
 * Problem 2: time-ordered hold-out (latest 20% of orders, 30-day embargo) and 5-fold forward-chaining CV;
      a random split grouped by customer_unique_id is kept only as a comparison.
 """
@@ -69,6 +71,46 @@ def pick_final(cv, col, sd_col, higher, order):
     return ok[0]
 
 
+def pick_final_paired(per_fold, order, higher):
+    """One-standard-deviation rule on PAIRED fold scores: the simplest model whose fold-by-fold shortfall against
+    the best model is no larger than the sd of that shortfall.
+
+    Under forward chaining every model scores worse in some periods (a later fold can have higher freight or a
+    different late rate), so the fold sd of a single model mixes period effects with model differences and the
+    plain rule (pick_final) becomes too lenient. Comparing models within each fold removes the period effect;
+    this is the same paired test the feature selection uses.
+    """
+    best = per_fold.mean().idxmax() if higher else per_fold.mean().idxmin()
+    rows = []
+    for m in per_fold:
+        d = (per_fold[best] - per_fold[m]) if higher else (per_fold[m] - per_fold[best])
+        rows.append({"Model": m, "Mean": per_fold[m].mean(), "Shortfall vs best": d.mean(), "Shortfall sd": d.std(),
+                     "Within one sd": bool(d.mean() <= d.std())})
+    tbl = pd.DataFrame(rows).set_index("Model").reindex([m for m in order if m in per_fold]).reset_index()
+    return tbl.loc[tbl["Within one sd"], "Model"].iloc[0], tbl
+
+
+def fold_scores_classification(models, train, fs, k=5):
+    """Lift (PR-AUC / late rate) of every model in each forward-chaining fold, for pick_final_paired."""
+    X, y = train[cols_for(fs)], train.clf_target
+    split = list(M.TimeForwardCV(k).split(X))
+    return pd.DataFrame({n: [M.pr_lift(y.iloc[va], M.clf_scores(clone(m).fit(X.iloc[tr], y.iloc[tr]), X.iloc[va]))
+                             for tr, va in split] for n, m in models.items()},
+                        index=pd.Index(range(1, k + 1), name="Fold"))
+
+
+def time_fold_table(train, cv):
+    """Dates and sizes of every forward-chaining fold of Problem 1 (item grain)."""
+    rows = []
+    for j, (tr, va) in enumerate(cv.split(train), 1):
+        t, d = train.order_purchase_timestamp.iloc[tr], train.order_purchase_timestamp.iloc[va]
+        rows.append({"Fold": j, "Train dates": f"{t.min():%Y-%m-%d} to {t.max():%Y-%m-%d}", "Train items": len(tr),
+                     "Validation dates": f"{d.min():%Y-%m-%d} to {d.max():%Y-%m-%d}", "Validation items": len(va),
+                     "Validation mean freight (R$)": train.freight_value.iloc[va].mean(),
+                     "Orders in both": len(set(train.order_id.iloc[tr]) & set(train.order_id.iloc[va]))})
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------------ documentation tables
 def feature_set_table(sets):
     return pd.DataFrame([{"Feature set": k, "Numeric": ", ".join(v["num"]), "Categorical": ", ".join(v["cat"]) or "-",
@@ -92,24 +134,39 @@ def split_summary(tr_a, te_a, tr_b, te_b):
 
 
 # ------------------------------------------------------------------ Problem 1: tuning
-def tune_regression(train, fs, n_iter=8, tune_rows=30000, n_jobs=-1):
-    """Ridge alpha: full grid. Forest: randomised search on a grouped sub-sample. 5-fold grouped CV."""
-    X = train[cols_for(fs)]
+def _search_log(search):
+    """Every candidate of a grid or random search with its mean CV score and fold sd (MAE scores made positive)."""
+    res = search.cv_results_
+    sign = -1 if str(search.scoring).startswith("neg_") else 1
+    log = pd.DataFrame([{k[3:] if k.startswith("m__") else k: v for k, v in prm.items()} for prm in res["params"]])
+    return log.assign(**{"CV score": sign * res["mean_test_score"], "CV sd": res["std_test_score"]}).sort_values(
+        "CV score", ascending=sign < 0).reset_index(drop=True)
+
+
+def tune_regression(train, fs, n_iter=8, tune_rows=30000, n_jobs=-1, cv=None):
+    """Ridge alpha: full grid. Forest: randomised search on a grouped sub-sample.
+
+    cv: 5-fold grouped CV by default (Phase 2); Phase 3 passes forward-chaining CV. Every candidate's score is kept
+    in out["ridge_grid"] and out["rf_search"].
+    """
+    X, cv = train[cols_for(fs)], cv or M.OrderGroupCV(5)
     out, rows = {}, []
     g = GridSearchCV(M.reg_estimators(fs)["Linear: Ridge"], {"m__alpha": [0.01, 0.1, 1, 10, 100, 1000]},
-                     cv=M.OrderGroupCV(5), scoring="neg_mean_absolute_error", n_jobs=n_jobs)
+                     cv=cv, scoring="neg_mean_absolute_error", n_jobs=n_jobs)
     g.fit(X, train.reg_target)
     out["ridge_alpha"] = g.best_params_["m__alpha"]
+    out["ridge_grid"] = _search_log(g)
     rows.append(("1 Regression", "Ridge", "grid (6)", str(g.best_params_), -g.best_score_, "MAE (log)"))
 
     sub = subsample(train, tune_rows)
     space = {"m__min_samples_leaf": [2, 5, 10, 20], "m__max_features": [0.2, 0.33, 0.5],
              "m__max_depth": [None, 16, 24], "m__n_estimators": [100]}
     r = RandomizedSearchCV(M.reg_estimators(fs, n_jobs=n_jobs)["Tree: RandomForest"], space, n_iter=n_iter,
-                           cv=M.OrderGroupCV(5), scoring="neg_mean_absolute_error", random_state=SEED,
+                           cv=cv, scoring="neg_mean_absolute_error", random_state=SEED,
                            n_jobs=1, refit=False)
     r.fit(sub[cols_for(fs)], sub.reg_target)
     out["rf_reg"] = {k[3:]: v for k, v in r.best_params_.items()}
+    out["rf_search"] = _search_log(r)
     rows.append(("1 Regression", "RandomForest", f"random ({n_iter} of 36)", str(r.best_params_), -r.best_score_, "MAE (log)"))
     return out, pd.DataFrame(rows, columns=["Problem", "Model", "Search", "Best params", "CV score", "Scored by"])
 
@@ -127,7 +184,8 @@ def tune_classification(train, fs, n_iter=20, n_jobs=-1):
     """All searches use 5-fold forward-chaining CV, scored by PR-AUC lift over each fold's late rate.
 
     Logistic C / class_weight: full grid. Forest: randomised search over leaf size, max features, depth and
-    class weight, on all training rows. Voting weight: grid, given the tuned base learners.
+    class weight, on all training rows. Voting weight: grid, given the tuned base learners. Every candidate's score
+    is kept in out["logit_grid"], out["rf_search"] and out["vote_grid"].
     """
     X, y, cv = train[cols_for(fs)], train.clf_target, M.TimeForwardCV(5)
     out, rows = {}, []
@@ -136,6 +194,7 @@ def tune_classification(train, fs, n_iter=20, n_jobs=-1):
                      cv=cv, scoring=M.LIFT_SCORER, n_jobs=n_jobs)
     g.fit(X, y)
     out["logit_C"], out["logit_cw"] = g.best_params_["m__C"], g.best_params_["m__class_weight"]
+    out["logit_grid"] = _search_log(g)
     rows.append(("2 is_late", "Logistic (L2)", "grid (8)", str(g.best_params_), g.best_score_, "PR-AUC lift"))
 
     space = {"m__min_samples_leaf": [10, 20, 50, 100, 200], "m__max_features": ["sqrt", 0.2, 0.3, 0.5],
@@ -145,12 +204,14 @@ def tune_classification(train, fs, n_iter=20, n_jobs=-1):
                            cv=cv, scoring=M.LIFT_SCORER, random_state=SEED, n_jobs=1, refit=False)
     r.fit(X, y)
     out["rf_clf"] = {k[3:]: v for k, v in r.best_params_.items()}
+    out["rf_search"] = _search_log(r)
     rows.append(("2 is_late", "RandomForest", f"random ({n_iter} of 240)", str(r.best_params_), r.best_score_, "PR-AUC lift"))
 
     vote = M.voting_classifier(fs, out["rf_clf"], out["logit_C"], out["logit_cw"], n_jobs=n_jobs)
     v = GridSearchCV(vote, {"weights": [[0.25, 0.75], [0.5, 0.5], [0.75, 0.25]]}, cv=cv, scoring=M.LIFT_SCORER, n_jobs=1)
     v.fit(X, y)
     out["vote_w"] = v.best_params_["weights"][0]
+    out["vote_grid"] = _search_log(v).assign(w_logit=lambda t: [w[0] for w in t.weights]).drop(columns="weights")
     rows.append(("2 is_late", "Voting (Logit + RF)", "grid (3)", f"{{'w_logit': {out['vote_w']}}}", v.best_score_, "PR-AUC lift"))
     return out, pd.DataFrame(rows, columns=["Problem", "Model", "Search", "Best params", "CV score", "Scored by"])
 
@@ -166,18 +227,27 @@ def final_clf_models(fs, best, n_estimators=200, n_jobs=-1):
 
 
 # ------------------------------------------------------------------ cross-validation
-def cv_regression(models, train, fs, k=5):
-    X, y = train[cols_for(fs)], train.reg_target
-    rows = []
+def cv_regression(models, train, fs, k=5, cv=None, folds=False):
+    """k-fold grouped CV (Phase 2) or the splitter passed as `cv` (Phase 3: forward chaining).
+
+    folds=True also returns every model's MAE (R$) in each fold, for the paired selection rule (pick_final_paired).
+    """
+    X, y, cv = train[cols_for(fs)], train.reg_target, cv or M.OrderGroupCV(k)
+    split = list(cv.split(X))
+    rows, per_fold = [], {}
     for name, m in models.items():
-        folds = []
-        for tr, va in M.OrderGroupCV(k).split(X):
+        res = []
+        for tr, va in split:
             mm = clone(m).fit(X.iloc[tr], y.iloc[tr])
-            folds.append(M.reg_metrics(y.iloc[va], mm.predict(X.iloc[va])))
-        f = pd.DataFrame(folds)
+            res.append(M.reg_metrics(y.iloc[va], mm.predict(X.iloc[va])))
+        f = pd.DataFrame(res)
+        per_fold[name] = f.MAE_rs.values
         rows.append({"Model": name, **{f"{c} mean": f[c].mean() for c in ["MAE_rs", "RMSE_rs", "R2_rs", "R2_log"]},
                      **{f"{c} sd": f[c].std() for c in ["MAE_rs", "RMSE_rs", "R2_rs"]}})
-    return pd.DataFrame(rows)
+    tbl = pd.DataFrame(rows)
+    if folds:
+        return tbl, pd.DataFrame(per_fold, index=pd.Index(range(1, len(split) + 1), name="Fold"))
+    return tbl
 
 
 def cv_classification(models, train, fs, k=5, share=F.REVIEW_SHARE):
@@ -402,19 +472,20 @@ def missed_late_orders(test, flags):
 
 
 # ------------------------------------------------------------------ ablation (feature breadth)
-def ablation_regression(train, n_rows=40000, k=3):
-    """Grouped CV of every nested Problem 1 feature set with a fixed forest, on an order-grouped sub-sample.
+def ablation_regression(train, n_rows=40000, k=3, cv=None):
+    """Grouped CV (or the splitter passed as `cv`) of every nested Problem 1 feature set with a fixed forest,
+    on an order-grouped sub-sample.
 
     As for Problem 2, each added group is judged by its PAIRED gain in MAE over the previous set, fold by fold
     (gain > 0 = lower MAE), with the sd of that gain across folds.
     """
-    sub = subsample(train, n_rows)
+    sub, cv = subsample(train, n_rows), cv or M.OrderGroupCV(k)
     rows, prev = [], None
     for name, fs in F.FEATURE_SETS.items():
         X = sub[cols_for(fs)]
         m = M.reg_estimators(fs, dict(n_estimators=100, min_samples_leaf=5, max_features=0.5))["Tree: RandomForest"]
         r = []
-        for tr, va in M.OrderGroupCV(k).split(X):
+        for tr, va in cv.split(X):
             mm = clone(m).fit(X.iloc[tr], sub.reg_target.iloc[tr])
             r.append(M.reg_metrics(sub.reg_target.iloc[va], mm.predict(X.iloc[va])))
         mae = np.array([a["MAE_rs"] for a in r])
@@ -554,12 +625,13 @@ def flag_overcharge(test, pred_primary, pred_check, q=0.95):
     return t, stab
 
 
-def audit_summary(flagged, stab):
+def audit_summary(flagged, stab, names=("forest", "Ridge")):
     f = flagged[flagged.flag_primary]
     top_sellers = max(1, int(0.05 * flagged.seller_id.nunique()))
     return pd.DataFrame({"metric": ["items flagged", "mean actual freight R$", "mean expected freight R$", "mean excess R$",
                                     "excess as % of all test freight", "flagged items from top 5% of sellers (by flag count)",
-                                    "flagged by both forest and Ridge (%)", "agreement of forest and Ridge flags (Jaccard)"],
+                                    f"flagged by both {names[0]} and {names[1]} (%)",
+                                    f"agreement of {names[0]} and {names[1]} flags (Jaccard)"],
                          "value": [len(f), f.freight_value.mean(), f.expected_rs.mean(), f.excess_rs.mean(),
                                    f.excess_rs.sum() / flagged.freight_value.sum() * 100,
                                    f.groupby("seller_id").size().sort_values(ascending=False).head(top_sellers).sum() / len(f) * 100,

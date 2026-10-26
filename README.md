@@ -83,6 +83,13 @@ checkout; precision, recall and F1 are reported for the riskiest 10% of orders (
 To reproduce it, put the CSVs in `data/` (or set `OLIST_DATA_DIR`) and run the notebook top to bottom (about 15
 minutes on 12 cores). It calls the reusable functions in `src/`.
 
+`notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` responds to the Phase 2 feedback. It re-evaluates Problem 1 on a
+**time-ordered split** (train on the earliest 80% of items, test on the latest 20%; feature selection, tuning and model
+choice on 5-fold forward-chaining CV), reports training, CV and test scores side by side, compares models with a
+paired fold-by-fold rule, and lists every candidate of the searches of both problems. On later periods the listing
+and timing features no longer help and are dropped; the final model stays a RandomForest, now trained and tested in
+time order. Problem 2 is unchanged. It runs in about 15 minutes.
+
 ## Dashboard
 
 An interactive Streamlit dashboard retells the consolidated EDA, section by section, and is
@@ -108,9 +115,10 @@ See `deployment/README.md` for more detail.
 
 ## Phase 3 — model app
 
-`deployment/model_app/` deploys the Phase 2 final models as a Streamlit app organised around the two stakeholders:
+`deployment/model_app/` deploys the final models as a Streamlit app organised around the two stakeholders:
 
-- **Logistics-pricing / finance analyst** (Problem 1, RandomForest with Ridge as a second opinion): a monthly
+- **Logistics-pricing / finance analyst** (Problem 1, RandomForest from the Phase 3 notebook, with Ridge as a
+  second opinion): a monthly
   *Freight audit* (sellers ranked by flag rate, items flagged by both models first, held-out items or an uploaded CSV),
   *Check a charge* (one charge, or a quote range for a new listing) and a *Tariff review* (where a simple published
   tariff misprices freight by distance and weight).
@@ -119,8 +127,8 @@ See `deployment/README.md` for more detail.
   real outcomes on request), a *Promise check* for new orders at checkout, and *Monitoring* of promise changes and
   model skill week by week.
 
-The Olist data end in 2018, so the app scores held-out historical records (the Problem 1 test items and the Problem 2
-test window, 26 May – 29 Aug 2018) as if they were new orders. To run it locally:
+The Olist data end in 2018, so the app scores held-out historical records (the Problem 1 test items, 24 May – 3 Sep
+2018, and the Problem 2 test window, 26 May – 29 Aug 2018) as if they were new orders. To run it locally:
 
 ```bash
 pip install -r deployment/model_app/requirements.txt
@@ -128,7 +136,7 @@ streamlit run deployment/model_app/app.py
 ```
 
 `deployment/model_app/build_models.py` rebuilds the model files and data from the raw CSVs with the code in `src/`
-and stops if a result drifts from the Phase 2 notebook. See `deployment/model_app/README.md` for the pages, files and
+and stops if a result drifts from the notebooks. See `deployment/model_app/README.md` for the pages, files and
 Streamlit Cloud settings.
 
 ## Tools

@@ -165,6 +165,40 @@ def comparison_chart_reg(reg_tbl, path=None):
     return _save(fig, path)
 
 
+def split_chart_reg(tbl, path=None):
+    """Problem 1: test MAE of the same models on the Phase 2 random split and on the time-ordered test set."""
+    fig, ax = plt.subplots(figsize=(6.4, 3.9))
+    c = tbl.iloc[::-1].reset_index(drop=True)
+    y = np.arange(len(c))
+    ax.barh(y + 0.2, c["Random MAE"], height=0.4, color=T.MUTED, label="random split (Phase 2, optimistic)")
+    ax.barh(y - 0.2, c["Time-ordered MAE"], height=0.4, color=T.CAT[0], label="time-ordered (Phase 3, used)")
+    ax.set_yticks(y, [m.split(": ")[-1] for m in c.Model])
+    ax.set_xlabel("test MAE (R$), lower is better")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=9, frameon=False)
+    T.title(ax, "Problem 1: random vs time-ordered test")
+    fig.tight_layout()
+    return _save(fig, path)
+
+
+def freight_drift_chart(items, cut_ts, path=None):
+    """Monthly median freight per chargeable kg and mean freight; shaded = the time-ordered test period."""
+    import matplotlib.dates as mdates
+    d = items.assign(month=items.order_purchase_timestamp.dt.to_period("M").dt.to_timestamp(),
+                     per_kg=items.freight_value / items.chargeable_kg.clip(lower=0.1))
+    m = d.groupby("month").agg(n=("freight_value", "size"), per_kg=("per_kg", "median"),
+                               mean_freight=("freight_value", "mean")).query("n >= 300")
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.8))
+    for a, col, lab in [(ax[0], "per_kg", "median freight per chargeable kg (R$)"), (ax[1], "mean_freight", "mean freight per item (R$)")]:
+        a.plot(m.index, m[col], color=T.CAT[0], lw=2, marker="o", ms=3)
+        a.axvspan(pd.Timestamp(cut_ts, unit="s"), m.index.max() + pd.Timedelta(days=31), color=T.AXIS, alpha=0.3, lw=0)
+        a.set_ylabel(lab); a.xaxis.set_major_locator(mdates.MonthLocator(bymonth=[1, 7]))
+        a.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    T.title(ax[0], "Freight per kg drifted upward", "months with at least 300 items; shaded = test period")
+    T.title(ax[1], "Mean freight per item", "shaded = test period")
+    fig.tight_layout()
+    return _save(fig, path)
+
+
 def comparison_chart_clf(split_tbl, path=None):
     """Problem 2: PR-AUC lift on a random split vs the time-ordered test set."""
     fig, ax = plt.subplots(figsize=(6.4, 3.9))

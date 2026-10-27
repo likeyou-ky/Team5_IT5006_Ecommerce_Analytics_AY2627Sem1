@@ -115,7 +115,9 @@ See `deployment/README.md` for more detail.
 
 ## Phase 3 — model app
 
-`deployment/model_app/` deploys the final models as a Streamlit app organised around the two stakeholders:
+`deployment/model_app/` deploys the final models as a Streamlit app organised around the two stakeholders.
+
+**Live (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final.
 
 - **Logistics-pricing / finance analyst** (Problem 1, RandomForest from the Phase 3 notebook, with Ridge as a
   second opinion): a monthly

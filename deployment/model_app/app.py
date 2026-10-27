@@ -1081,8 +1081,9 @@ def model_card():
         st.markdown(
             f"- **User and use:** the operations and customer-experience team; a daily follow-up list, promises at "
             f"checkout, monitoring.\n"
-            f"- **Model:** plain logistic regression (no penalty), the simplest model within one fold standard "
-            f"deviation of the best in forward-chaining cross-validation.\n"
+            f"- **Model:** plain logistic regression (no penalty), the simplest model within one standard deviation "
+            f"of the best in forward-chaining cross-validation, compared fold by fold (it trails the L2 model by "
+            f"0.02 ± 0.09 of lift).\n"
             f"- **Inputs:** promised delivery time, distance, same-state route, seller and customer state, order "
             f"value, freight, freight share, number of items and sellers. Everything is known at checkout; carrier "
             f"and delivery dates are never used.\n"

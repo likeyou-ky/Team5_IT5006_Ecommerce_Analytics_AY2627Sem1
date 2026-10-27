@@ -5,6 +5,9 @@ stakeholders of our problems: Problem 1 from `notebooks/Team5_Phase3_IT5006_AY26
 time-ordered split after the Phase 2 feedback) and Problem 2 from `notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb`. The
 Phase 1 EDA dashboard (`deployment/app.py`) is a separate app and is unchanged.
 
+**Live (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final. Streamlit Cloud builds it from
+branch `Phase3_Test`, main file `deployment/model_app/app.py`.
+
 The Olist data end in 2018, so the app scores **held-out historical records as if they were new**: the Problem 1
 test items (the latest 20% of items, 24 May – 3 Sep 2018) and the Problem 2 test window (26 May – 29 Aug 2018), none of which the models saw in training. It also
 scores listings and orders that you type in, and CSV files of items that you upload.

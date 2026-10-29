@@ -1,0 +1,10 @@
+# Model API dependencies. Render installs them with `pip install -r requirements.txt` (root directory deployment/api).
+# scikit-learn, numpy, pandas and joblib are pinned to the versions that wrote models/*.joblib (see /model-info):
+# a saved model must be loaded with the library versions that wrote it.
+fastapi>=0.115,<1
+uvicorn>=0.30
+pydantic>=2.7,<3
+scikit-learn==1.8.0
+numpy==2.4.2
+pandas==2.3.3
+joblib==1.5.3

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Build the model files and data for the Phase 3 model app (deployment/model_app/app.py).
+Build the model files and data for the Phase 3 deployment: the model API (deployment/api/main.py, FastAPI on Render)
+and the model app that calls it (deployment/model_app/app.py, Streamlit).
 
 Both models are trained with the notebooks' own code in src/ on the notebooks' own training splits:
 
@@ -15,14 +16,20 @@ Unusual freight = residual in the top 5% of the test set, either overall (the no
 band (the report's recommendation, so expensive items do not crowd the review list). Both cut-offs are stored for
 both models.
 
-Writes into deployment/model_app/:
+Writes into deployment/api/ (the API service, self-contained so Render can build it from that folder):
   models/freight_forest.joblib   the Problem 1 forest
   models/freight_ridge.joblib    the Problem 1 Ridge model (second opinion for the audit)
   models/late_logit.joblib       the Problem 2 logistic model
-  data/heldout_items.csv         Problem 1 test items (the latest 20%, purchased after every training item)
-  data/heldout_orders.csv        Problem 2 test window, 26 May - 29 Aug 2018, with outcomes for the after-the-fact check
+  models/model_metadata.json     what the API needs besides the models: features, metrics, cut-offs, bands, tariff
+  models/feature_stats.json      training distribution of every input, for the API's drift warnings
   data/zip_centroids.csv         zip-code prefix -> centroid and state, to place new listings and orders
-  data/facts.json                every number the app shows
+and into deployment/model_app/data/ (the app):
+  heldout_items.csv              Problem 1 test items (the latest 20%, purchased after every training item)
+  heldout_orders.csv             Problem 2 test window, 26 May - 29 Aug 2018, with outcomes for the after-the-fact check
+  facts.json                     every number the app shows
+
+The app's scores for the held-out records (scored_items.csv, scored_orders.csv) come from the API: run
+deployment/api/batch_score.py after this script.
 
 The checks at the end stop the script if a split or a test score drifts from the notebooks. Forest scores
 differ in the third decimal between Windows and macOS runs (same data, same library versions), so they are checked
@@ -41,9 +48,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "src"))
 import features as F, models as M, pipeline as P
 
-MODELS, DATA = os.path.join(HERE, "models"), os.path.join(HERE, "data")
-os.makedirs(MODELS, exist_ok=True)
-os.makedirs(DATA, exist_ok=True)
+API = os.path.normpath(os.path.join(HERE, "..", "api"))
+MODELS, API_DATA, DATA = os.path.join(API, "models"), os.path.join(API, "data"), os.path.join(HERE, "data")
+for folder in (MODELS, API_DATA, DATA):
+    os.makedirs(folder, exist_ok=True)
 
 RF_PARAMS = dict(min_samples_leaf=2, max_features=0.33, max_depth=16)   # Phase 3 notebook Section 3, tuning table
 RIDGE_ALPHA = 10                                                        # Phase 3 notebook Section 3, tuning table
@@ -59,7 +67,7 @@ AUDIT_BANDS = ([0, 50, 100, 200, 500, np.inf], ["<50", "50-100", "100-200", "200
 
 
 def residual(freight, pred_log):
-    """Unusual-freight residual exactly as app.py computes it: log(1 + charged) - log(1 + expected)."""
+    """Unusual-freight residual exactly as the API computes it: log(1 + charged) - log(1 + expected)."""
     return np.log1p(np.asarray(freight)) - np.log1p(np.clip(np.expm1(pred_log), 0, None))
 
 
@@ -138,9 +146,9 @@ held_items = te_a[ITEM_COLS + [c for c in cols_a if c not in ITEM_COLS]]
 ORDER_COLS = ["order_id", "seller_id", "category", "order_purchase_timestamp"]
 held_orders = te_b[ORDER_COLS + [c for c in cols_b if c not in ORDER_COLS] + ["clf_target", "days_late"]].assign(
     low_review=low.reindex(te_b.order_id).values)       # outcome only, shown after the fact, never a feature
-held_items.to_csv(os.path.join(DATA, "heldout_items.csv"), index=False)      # full precision: the app must
+held_items.to_csv(os.path.join(DATA, "heldout_items.csv"), index=False)      # full precision: the API must
 held_orders.to_csv(os.path.join(DATA, "heldout_orders.csv"), index=False)    # reproduce these scores exactly
-back = pd.read_csv(os.path.join(DATA, "heldout_items.csv"))                   # re-scored as app.py does
+back = pd.read_csv(os.path.join(DATA, "heldout_items.csv"))                   # re-scored as the API does
 app_flags = {(name, rule): int(unusual(residual(back.freight_value, m.predict(back[cols_a])), audit_band(back.price),
                                        cuts[name], rule).sum())
              for name, m in [("model", model), ("ridge", ridge)] for rule in ("overall", "band")}
@@ -151,7 +159,7 @@ zips = (geo.groupby("geolocation_zip_code_prefix")       # same centroids as fea
         .agg(lat=("geolocation_lat", "median"), lng=("geolocation_lng", "median"),
              state=("geolocation_state", lambda s: s.value_counts().index[0]))
         .reset_index().rename(columns={"geolocation_zip_code_prefix": "zip_prefix"}))
-zips.to_csv(os.path.join(DATA, "zip_centroids.csv"), index=False, float_format="%.6f")
+zips.to_csv(os.path.join(API_DATA, "zip_centroids.csv"), index=False, float_format="%.6f")
 state_cen = zips.groupby("state")[["lat", "lng"]].median().round(4)
 
 joblib.dump(model, os.path.join(MODELS, "freight_forest.joblib"), compress=3)
@@ -220,7 +228,82 @@ facts = {
 }
 json.dump(facts, open(os.path.join(DATA, "facts.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
 
-for folder in (DATA, MODELS):
+# ============================ the API's metadata and drift statistics ============================
+p1, p2 = facts["p1"], facts["p2"]
+prep_b = logit.named_steps["prep"]
+metadata = {
+    "service": "Team 5 Olist model API",
+    "built": facts["built"],
+    "models": {
+        "freight_forest": {"file": "freight_forest.joblib", "problem": "Problem 1, fair freight", "role": "fair freight",
+                           "estimator": "RandomForestRegressor on log(1 + freight)", "params": p1["forest_params"],
+                           "test": p1["test"]},
+        "freight_ridge": {"file": "freight_ridge.joblib", "problem": "Problem 1, fair freight",
+                          "role": "second opinion on unusual charges", "estimator": "Ridge on log(1 + freight)",
+                          "params": {"alpha": RIDGE_ALPHA}, "test": p1["ridge_test"]},
+        "late_logit": {"file": "late_logit.joblib", "problem": "Problem 2, late delivery",
+                       "role": "late-delivery risk ranking", "estimator": "LogisticRegression (no penalty)",
+                       "params": {"penalty": None}, "test": p2["test"], "daily": p2["daily"]},
+    },
+    "freight": {**{k: p1[k] for k in ["n_train", "n_test", "train_dates", "test_dates", "mean_freight_test",
+                                      "features_num", "features_cat", "flag", "tariff", "categories", "states"]},
+                "columns": cols_a, "unseen_listing_mae": facts["notebook"]["p1_unseen_mae"],
+                # quote range = fair freight +/- the test MAE of the item's price band (upper edges; null = no limit)
+                "price_bands": [dict(b, upper=None if np.isinf(hi) else hi)
+                                for b, hi in zip(p1["price_bands"], PRICE_BANDS[0][1:])]},
+    "late": {**{k: p2[k] for k in ["n_train", "n_test", "train_dates", "test_dates", "late_rate_test", "features_num",
+                                   "features_cat", "share", "score_pct"]},
+             "columns": cols_b,
+             # driver contributions are measured against the average test-window order, as the app's queue shows them
+             "reference": {"names": prep_b.get_feature_names_out().tolist(),
+                           "values": prep_b.transform(te_b[cols_b]).mean(axis=0).tolist()}},
+    "state_centroids": facts["state_centroids"],
+}
+json.dump(metadata, open(os.path.join(MODELS, "model_metadata.json"), "w", encoding="utf-8"), indent=1,
+          ensure_ascii=False)
+
+
+COUNTS = ["n_items", "n_sellers"]
+
+
+def num_stats(frame, cols):
+    """Training mean and sd of each numeric input; the skewed ones on the log1p scale, as the linear models see them.
+    Counts are mostly 1, so any multi-seller order would sit 3 sd out: they are flagged only above the training maximum."""
+    out = {}
+    for c in cols:
+        if c == "same_state":
+            continue                                        # a 0/1 flag derived from the states: nothing to drift
+        x = frame[c].dropna().astype(float)
+        if c in COUNTS:
+            out[c] = {"scale": "count", "max": int(x.max()), "n": int(len(x))}
+            continue
+        log = c in M.SKEWED
+        v = np.log1p(x) if log else x
+        mu, sd = float(v.mean()), float(v.std())
+        back = np.expm1 if log else float
+        out[c] = {"scale": "log1p" if log else "raw", "mean": mu, "std": sd, "n": int(len(x)),
+                  "low": float(back(mu - 3 * sd)), "high": float(back(mu + 3 * sd)),   # the 3-sd band in R$, kg, km...
+                  "train_share_outside": r((np.abs(v - mu) > 3 * sd).mean(), 4)}
+    return out
+
+
+min_freq = model.named_steps["prep"].named_transformers_["cat"].min_frequency
+feature_stats = {
+    "method": "An input is flagged when it lies more than 3 standard deviations from its training mean. Skewed inputs "
+              "(weights, volumes, distances, prices, freight) are compared on the log1p scale, as the linear models "
+              "see them. Counts (items and sellers in the order) are flagged above the training maximum, and "
+              "categories the model did not see in training are flagged too.",
+    "z": 3.0,
+    "min_frequency": min_freq,      # rarer training categories are pooled into one 'infrequent' level by the encoder
+    "freight": {"numeric": num_stats(tr_a, fs_a["num"]),
+                "categorical": {c: tr_a[c].astype(str).value_counts().astype(int).to_dict() for c in fs_a["cat"]}},
+    "late": {"numeric": num_stats(tr_b, fs_b["num"]),
+             "categorical": {c: tr_b[c].astype(str).value_counts().astype(int).to_dict() for c in fs_b["cat"]}},
+}
+json.dump(feature_stats, open(os.path.join(MODELS, "feature_stats.json"), "w", encoding="utf-8"), indent=1,
+          ensure_ascii=False)
+
+for folder in (DATA, MODELS, API_DATA):
     for f in sorted(os.listdir(folder)):
         print(f"wrote {f:<24} {os.path.getsize(os.path.join(folder, f)) / 1e6:6.2f} MB")
 
@@ -242,8 +325,8 @@ NB = {
     "Ridge test MAE": (ridge_test["MAE_rs"], 6.123, 0.001), "Ridge test R2": (ridge_test["R2_rs"], 0.427, 0.001),
     **{f"logit lift {m}": (by_month.set_index("Month").Lift[m], v, 0.002)
        for m, v in [("2018-05", 10.716), ("2018-06", 6.356), ("2018-07", 2.419), ("2018-08", 1.176)]},
-    # the app must reproduce every unusual-freight count when it re-scores the CSV it reads
-    **{f"unusual items ({name}, {rule}), app vs build": (app_flags[name, rule], int(flags[name][rule].sum()), 0)
+    # the API must reproduce every unusual-freight count when it re-scores the CSV the batch scorer posts
+    **{f"unusual items ({name}, {rule}), API path vs build": (app_flags[name, rule], int(flags[name][rule].sum()), 0)
        for name in ("model", "ridge") for rule in ("overall", "band")},
 }
 fail = [(k, round(float(c), 4), v) for k, (c, v, tol) in NB.items() if abs(c - v) > tol + 1e-9]

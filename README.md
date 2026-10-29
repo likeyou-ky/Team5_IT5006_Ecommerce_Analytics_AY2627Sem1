@@ -20,7 +20,8 @@ project-root/
 ├── src/             reusable modules: features.py, models.py, pipeline.py, plots.py, olist_theme.py
 ├── deployment/
 │   ├── app.py, gen_dashboard_data.py, data/   Phase 1 EDA dashboard
-│   └── model_app/                              Phase 3 model app: app.py, build_models.py, models/, data/
+│   ├── api/                                    Phase 3 model API (FastAPI on Render): main.py, models/, tests, batch scoring
+│   └── model_app/                              Phase 3 model app (Streamlit frontend of the API): app.py, build_models.py, data/
 ├── docs/            reports and slides, kept local (only docs/README.md is versioned)
 ├── requirements.txt
 └── README.md
@@ -113,11 +114,18 @@ OLIST_DATA_DIR=/path/to/Olist_CSV python deployment/gen_dashboard_data.py
 
 See `deployment/README.md` for more detail.
 
-## Phase 3 — model app
+## Phase 3 — model API and app
 
-`deployment/model_app/` deploys the final models as a Streamlit app organised around the two stakeholders.
+The final models are deployed in two parts, following the course's deployment lesson:
 
-**Live (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final.
+- `deployment/api/`: a **FastAPI model service on Render** that loads the three saved pipelines once, validates every
+  input, returns predictions with drift warnings and logs each one (`/`, `/model-info`, `/freight/predict`,
+  `/freight/batch`, `/late/predict`, `/late/batch`, `/logs/summary`, `/docs`). Endpoints and examples:
+  `deployment/api/README.md`. **Live:** https://team5-olist-api.onrender.com/docs
+- `deployment/model_app/`: a **Streamlit app that calls the API**, organised around the two stakeholders. It holds
+  no model files.
+
+**Live app (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final.
 
 - **Logistics-pricing / finance analyst** (Problem 1, RandomForest from the Phase 3 notebook, with Ridge as a
   second opinion): a monthly
@@ -130,22 +138,25 @@ See `deployment/README.md` for more detail.
   model skill week by week.
 
 The Olist data end in 2018, so the app scores held-out historical records (the Problem 1 test items, 24 May – 3 Sep
-2018, and the Problem 2 test window, 26 May – 29 Aug 2018) as if they were new orders. To run it locally:
+2018, and the Problem 2 test window, 26 May – 29 Aug 2018) as if they were new orders. To run both locally:
 
 ```bash
-pip install -r deployment/model_app/requirements.txt
-streamlit run deployment/model_app/app.py
+pip install -r deployment/api/requirements.txt -r deployment/model_app/requirements.txt
+uvicorn main:app --app-dir deployment/api --port 8000
+API_URL=http://localhost:8000 streamlit run deployment/model_app/app.py
 ```
 
 `deployment/model_app/build_models.py` rebuilds the model files and data from the raw CSVs with the code in `src/`
-and stops if a result drifts from the notebooks. See `deployment/model_app/README.md` for the pages, files and
-Streamlit Cloud settings.
+and stops if a result drifts from the notebooks; `deployment/api/batch_score.py` then scores the held-out records
+through the API for the app's population pages. See `deployment/model_app/README.md` for the pages and Streamlit
+Cloud settings, and `deployment/api/README.md` for the API and its Render settings.
 
 ## Tools
 
 The analysis and modelling use Python with pandas, NumPy, scikit-learn and matplotlib / seaborn.
-The dashboard and the model app use Streamlit and Plotly. `requirements.txt` gives minimum versions; the model app's
-own `requirements.txt` pins the libraries that load its saved models.
+The dashboard and the model app use Streamlit and Plotly; the model API uses FastAPI, Pydantic and uvicorn.
+`requirements.txt` gives minimum versions; the API's own `requirements.txt` pins the libraries that load its saved
+models.
 
 ## Reproducibility
 

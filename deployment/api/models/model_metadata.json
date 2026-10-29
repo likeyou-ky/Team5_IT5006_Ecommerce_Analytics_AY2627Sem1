@@ -1,0 +1,684 @@
+{
+ "service": "Team 5 Olist model API",
+ "built": {
+  "date": "2026-10-29",
+  "python": "3.14.3",
+  "pandas": "2.3.3",
+  "numpy": "2.4.2",
+  "scikit_learn": "1.8.0",
+  "seed": 42
+ },
+ "models": {
+  "freight_forest": {
+   "file": "freight_forest.joblib",
+   "problem": "Problem 1, fair freight",
+   "role": "fair freight",
+   "estimator": "RandomForestRegressor on log(1 + freight)",
+   "params": {
+    "min_samples_leaf": 2,
+    "max_features": 0.33,
+    "max_depth": 16,
+    "n_estimators": 200
+   },
+   "test": {
+    "MAE_rs": 5.398,
+    "RMSE_rs": 12.032,
+    "R2_rs": 0.591,
+    "MAE_pct": 24.7
+   }
+  },
+  "freight_ridge": {
+   "file": "freight_ridge.joblib",
+   "problem": "Problem 1, fair freight",
+   "role": "second opinion on unusual charges",
+   "estimator": "Ridge on log(1 + freight)",
+   "params": {
+    "alpha": 10
+   },
+   "test": {
+    "MAE_rs": 6.123,
+    "RMSE_rs": 14.243,
+    "R2_rs": 0.427
+   }
+  },
+  "late_logit": {
+   "file": "late_logit.joblib",
+   "problem": "Problem 2, late delivery",
+   "role": "late-delivery risk ranking",
+   "estimator": "LogisticRegression (no penalty)",
+   "params": {
+    "penalty": null
+   },
+   "test": {
+    "Lift": 1.998,
+    "PR_AUC": 0.07,
+    "ROC_AUC": 0.672,
+    "Precision": 0.08,
+    "Recall": 0.228,
+    "F1": 0.118,
+    "Brier": 0.041
+   },
+   "daily": {
+    "flagged": 1926,
+    "precision": 0.066,
+    "recall": 0.188,
+    "late_caught": 127
+   }
+  }
+ },
+ "freight": {
+  "n_train": 90121,
+  "n_test": 22529,
+  "train_dates": [
+   "2016-09-04",
+   "2018-05-24"
+  ],
+  "test_dates": [
+   "2018-05-24",
+   "2018-09-03"
+  ],
+  "mean_freight_test": 21.81,
+  "features_num": [
+   "weight_kg",
+   "volume_cm3",
+   "chargeable_kg",
+   "distance_km",
+   "same_state",
+   "price",
+   "n_items",
+   "n_sellers"
+  ],
+  "features_cat": [
+   "seller_state",
+   "customer_state",
+   "category"
+  ],
+  "flag": {
+   "q": 0.95,
+   "tol": 1e-09,
+   "band_edges": [
+    50,
+    100,
+    200,
+    500
+   ],
+   "band_labels": [
+    "<50",
+    "50-100",
+    "100-200",
+    "200-500",
+    "500+"
+   ],
+   "cuts": {
+    "model": {
+     "overall": 0.6392748249973494,
+     "band": {
+      "<50": 0.4425617753453809,
+      "50-100": 0.6198431792344281,
+      "100-200": 0.7076922241370962,
+      "200-500": 0.7501497654455697,
+      "500+": 0.7451825516202978
+     }
+    },
+    "ridge": {
+     "overall": 0.6833192867108547,
+     "band": {
+      "<50": 0.46610927760992893,
+      "50-100": 0.5830243118897753,
+      "100-200": 0.7597946664370432,
+      "200-500": 0.892692546461969,
+      "500+": 1.106133243013666
+     }
+    }
+   },
+   "ratio_overall": 1.895,
+   "n_unusual": {
+    "overall": 1128,
+    "band": 1129
+   },
+   "both_share": {
+    "overall": 0.662,
+    "band": 0.68
+   }
+  },
+  "tariff": {
+   "base": 9.614,
+   "per_kg": 1.846,
+   "per_100km": 0.811,
+   "same_state": -3.985,
+   "mae": 6.221
+  },
+  "categories": [
+   "bed_bath_table",
+   "sports_leisure",
+   "health_beauty",
+   "furniture_decor",
+   "computers_accessories",
+   "housewares",
+   "watches_gifts",
+   "garden_tools",
+   "telephony",
+   "toys",
+   "cool_stuff",
+   "auto",
+   "perfumery",
+   "baby",
+   "electronics",
+   "stationery",
+   "fashion_bags_accessories",
+   "unknown",
+   "office_furniture",
+   "pet_shop",
+   "consoles_games",
+   "luggage_accessories",
+   "small_appliances",
+   "home_appliances",
+   "musical_instruments",
+   "construction_tools_construction",
+   "books_general_interest",
+   "home_construction",
+   "home_confort",
+   "furniture_living_room",
+   "food",
+   "drinks",
+   "audio",
+   "market_place",
+   "air_conditioning",
+   "fashion_shoes",
+   "fixed_telephony",
+   "food_drink",
+   "industry_commerce_and_business",
+   "kitchen_dining_laundry_garden_furniture",
+   "books_technical",
+   "home_appliances_2",
+   "costruction_tools_garden",
+   "computers",
+   "agro_industry_and_commerce",
+   "construction_tools_lights",
+   "art",
+   "construction_tools_safety",
+   "christmas_supplies",
+   "signaling_and_security",
+   "fashion_underwear_beach",
+   "fashion_male_clothing",
+   "tablets_printing_image",
+   "furniture_bedroom",
+   "costruction_tools_tools",
+   "dvds_blu_ray",
+   "fashio_female_clothing",
+   "books_imported",
+   "cine_photo",
+   "small_appliances_home_oven_and_coffee",
+   "furniture_mattress_and_upholstery",
+   "fashion_sport",
+   "flowers",
+   "diapers_and_hygiene",
+   "music",
+   "home_comfort_2",
+   "party_supplies",
+   "cds_dvds_musicals",
+   "la_cuisine",
+   "fashion_childrens_clothes",
+   "pc_gamer",
+   "arts_and_craftmanship",
+   "security_and_services",
+   "portateis_cozinha_e_preparadores_de_alimentos"
+  ],
+  "states": [
+   "AC",
+   "AL",
+   "AM",
+   "AP",
+   "BA",
+   "CE",
+   "DF",
+   "ES",
+   "GO",
+   "MA",
+   "MG",
+   "MS",
+   "MT",
+   "PA",
+   "PB",
+   "PE",
+   "PI",
+   "PR",
+   "RJ",
+   "RN",
+   "RO",
+   "RR",
+   "RS",
+   "SC",
+   "SE",
+   "SP",
+   "TO"
+  ],
+  "columns": [
+   "weight_kg",
+   "volume_cm3",
+   "chargeable_kg",
+   "distance_km",
+   "same_state",
+   "price",
+   "n_items",
+   "n_sellers",
+   "seller_state",
+   "customer_state",
+   "category",
+   "order_id",
+   "purchase_ts"
+  ],
+  "unseen_listing_mae": 5.76,
+  "price_bands": [
+   {
+    "band": "<25",
+    "n": 2615,
+    "mae": 2.16,
+    "mae_pct": 16.1,
+    "upper": 25
+   },
+   {
+    "band": "25-50",
+    "n": 5302,
+    "mae": 3.06,
+    "mae_pct": 19.2,
+    "upper": 50
+   },
+   {
+    "band": "50-100",
+    "n": 6169,
+    "mae": 4.37,
+    "mae_pct": 22.6,
+    "upper": 100
+   },
+   {
+    "band": "100-200",
+    "n": 5826,
+    "mae": 7.0,
+    "mae_pct": 27.4,
+    "upper": 200
+   },
+   {
+    "band": "200-500",
+    "n": 1935,
+    "mae": 10.56,
+    "mae_pct": 29.7,
+    "upper": 500
+   },
+   {
+    "band": "500+",
+    "n": 682,
+    "mae": 16.92,
+    "mae_pct": 33.0,
+    "upper": null
+   }
+  ]
+ },
+ "late": {
+  "n_train": 70241,
+  "n_test": 19295,
+  "train_dates": [
+   "2016-09-15",
+   "2018-04-26"
+  ],
+  "test_dates": [
+   "2018-05-26",
+   "2018-08-29"
+  ],
+  "late_rate_test": 0.0349,
+  "features_num": [
+   "promised_days",
+   "distance_km",
+   "same_state",
+   "price_total",
+   "freight_total",
+   "freight_ratio",
+   "n_items",
+   "n_sellers"
+  ],
+  "features_cat": [
+   "seller_state",
+   "customer_state"
+  ],
+  "share": 0.1,
+  "score_pct": [
+   1e-05,
+   0.00568,
+   0.00822,
+   0.0101,
+   0.01187,
+   0.01336,
+   0.01471,
+   0.01606,
+   0.01728,
+   0.01862,
+   0.02012,
+   0.02137,
+   0.02267,
+   0.02413,
+   0.02551,
+   0.02695,
+   0.02837,
+   0.02985,
+   0.03102,
+   0.03238,
+   0.03382,
+   0.03506,
+   0.03651,
+   0.03777,
+   0.03912,
+   0.04036,
+   0.04164,
+   0.04282,
+   0.0439,
+   0.04524,
+   0.04649,
+   0.04787,
+   0.04909,
+   0.05031,
+   0.05174,
+   0.05304,
+   0.0543,
+   0.0556,
+   0.05691,
+   0.05823,
+   0.05955,
+   0.0609,
+   0.06247,
+   0.06373,
+   0.06528,
+   0.06652,
+   0.06796,
+   0.06944,
+   0.07097,
+   0.07274,
+   0.07418,
+   0.07572,
+   0.07756,
+   0.07922,
+   0.08109,
+   0.08257,
+   0.08459,
+   0.08638,
+   0.08812,
+   0.09007,
+   0.09196,
+   0.09371,
+   0.09554,
+   0.09745,
+   0.09943,
+   0.10167,
+   0.10372,
+   0.10594,
+   0.1087,
+   0.11108,
+   0.11347,
+   0.11612,
+   0.11871,
+   0.12144,
+   0.12439,
+   0.12728,
+   0.13028,
+   0.13412,
+   0.13803,
+   0.14176,
+   0.14559,
+   0.1495,
+   0.15362,
+   0.15897,
+   0.1646,
+   0.1701,
+   0.17575,
+   0.18274,
+   0.19089,
+   0.19873,
+   0.20759,
+   0.21796,
+   0.23036,
+   0.24461,
+   0.25958,
+   0.27671,
+   0.29346,
+   0.31631,
+   0.34955,
+   0.39845,
+   0.69037
+  ],
+  "columns": [
+   "promised_days",
+   "distance_km",
+   "same_state",
+   "price_total",
+   "freight_total",
+   "freight_ratio",
+   "n_items",
+   "n_sellers",
+   "seller_state",
+   "customer_state",
+   "order_id",
+   "purchase_ts"
+  ],
+  "reference": {
+   "names": [
+    "distance_km",
+    "price_total",
+    "freight_total",
+    "missingindicator_distance_km",
+    "promised_days",
+    "same_state",
+    "freight_ratio",
+    "n_items",
+    "n_sellers",
+    "seller_state_BA",
+    "seller_state_CE",
+    "seller_state_DF",
+    "seller_state_ES",
+    "seller_state_GO",
+    "seller_state_MA",
+    "seller_state_MG",
+    "seller_state_MS",
+    "seller_state_MT",
+    "seller_state_PE",
+    "seller_state_PR",
+    "seller_state_RJ",
+    "seller_state_RN",
+    "seller_state_RS",
+    "seller_state_SC",
+    "seller_state_SP",
+    "seller_state_infrequent_sklearn",
+    "customer_state_AC",
+    "customer_state_AL",
+    "customer_state_AM",
+    "customer_state_AP",
+    "customer_state_BA",
+    "customer_state_CE",
+    "customer_state_DF",
+    "customer_state_ES",
+    "customer_state_GO",
+    "customer_state_MA",
+    "customer_state_MG",
+    "customer_state_MS",
+    "customer_state_MT",
+    "customer_state_PA",
+    "customer_state_PB",
+    "customer_state_PE",
+    "customer_state_PI",
+    "customer_state_PR",
+    "customer_state_RJ",
+    "customer_state_RN",
+    "customer_state_RO",
+    "customer_state_RR",
+    "customer_state_RS",
+    "customer_state_SC",
+    "customer_state_SE",
+    "customer_state_SP",
+    "customer_state_TO"
+   ],
+   "values": [
+    -0.1326574441838809,
+    0.006808670729566862,
+    0.12289991484280818,
+    -0.014436797522462352,
+    -0.4046798268413385,
+    0.12793843620717174,
+    0.048508071530205345,
+    -0.014385925547535218,
+    0.04810908181309321,
+    0.006219227779217414,
+    0.0012438455558434827,
+    0.007722207825861622,
+    0.0022803835190463853,
+    0.005389997408655092,
+    0.011661052086032651,
+    0.07043275459963722,
+    0.0003109613889608707,
+    0.0010365379632029023,
+    0.005545478103135527,
+    0.07488986784140969,
+    0.053692666493910336,
+    0.00020730759264058046,
+    0.025136045607670382,
+    0.03581238662866027,
+    0.6976418761337134,
+    0.0007774034724021767,
+    0.0005700958797615963,
+    0.0034205752785695775,
+    0.0015548069448043534,
+    0.0005700958797615963,
+    0.033065561026172585,
+    0.0111427831044312,
+    0.024203161440787768,
+    0.01865768333765224,
+    0.01793210676341021,
+    0.005960093288416689,
+    0.11054677377558952,
+    0.007100285047939881,
+    0.007877688520342058,
+    0.008240476807463074,
+    0.005856439492096398,
+    0.016688261207566727,
+    0.0043534594454521895,
+    0.05068670640062192,
+    0.11469292562840114,
+    0.00445711324177248,
+    0.0019175952319253693,
+    0.0005182689816014512,
+    0.048665457372376264,
+    0.03213267685928997,
+    0.003938844260171029,
+    0.46239958538481474,
+    0.0028504793988079814
+   ]
+  }
+ },
+ "state_centroids": {
+  "AC": [
+   -9.9604,
+   -67.8401
+  ],
+  "AL": [
+   -9.6064,
+   -36.1943
+  ],
+  "AM": [
+   -3.1027,
+   -60.0231
+  ],
+  "AP": [
+   0.0342,
+   -51.1372
+  ],
+  "BA": [
+   -12.9296,
+   -38.987
+  ],
+  "CE": [
+   -3.8423,
+   -38.6676
+  ],
+  "DF": [
+   -15.8129,
+   -47.9191
+  ],
+  "ES": [
+   -20.2972,
+   -40.3914
+  ],
+  "GO": [
+   -16.6667,
+   -49.2602
+  ],
+  "MA": [
+   -3.6603,
+   -44.4488
+  ],
+  "MG": [
+   -19.9011,
+   -43.9931
+  ],
+  "MS": [
+   -20.5413,
+   -54.6407
+  ],
+  "MT": [
+   -15.5853,
+   -56.0451
+  ],
+  "PA": [
+   -1.5251,
+   -48.4818
+  ],
+  "PB": [
+   -7.1296,
+   -35.9001
+  ],
+  "PE": [
+   -8.086,
+   -35.0412
+  ],
+  "PI": [
+   -5.8462,
+   -42.5804
+  ],
+  "PR": [
+   -24.9582,
+   -51.2432
+  ],
+  "RJ": [
+   -22.7825,
+   -43.2911
+  ],
+  "RN": [
+   -5.8577,
+   -35.8179
+  ],
+  "RO": [
+   -10.8419,
+   -62.4727
+  ],
+  "RR": [
+   2.819,
+   -60.6949
+  ],
+  "RS": [
+   -29.673,
+   -51.7118
+  ],
+  "SC": [
+   -27.0736,
+   -49.3565
+  ],
+  "SE": [
+   -10.8891,
+   -37.0859
+  ],
+  "SP": [
+   -23.5258,
+   -46.6775
+  ],
+  "TO": [
+   -9.8928,
+   -48.3192
+  ]
+ }
+}

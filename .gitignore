@@ -242,9 +242,13 @@ data/*
 !deployment/data/*.geojson
 !deployment/data/*.json
 
-# The model app's files are committed on purpose too: Streamlit Cloud loads the models and the held-out records
+# The model API's files are committed on purpose: Render loads the models and the zip-code table from the repository
+!deployment/api/models/*.joblib
+!deployment/api/data/*.csv
+# The model app (the frontend) reads the held-out records and the scores the API returned for them
 !deployment/model_app/data/*.csv
-!deployment/model_app/models/*.joblib
+# The API's inference log is written at run time
+deployment/api/logs/
 
 # Reports, summaries, generated outputs and local tools in docs/ are kept local (not shared on GitHub), as are the
 # report builder and the old headless run script; only docs/README.md is shared

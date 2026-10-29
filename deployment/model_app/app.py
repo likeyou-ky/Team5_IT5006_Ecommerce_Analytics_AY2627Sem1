@@ -15,33 +15,41 @@ Deploys the two final models, one tool set per stakeholder: Problem 1 from noteb
     Promise check     how risky a new order is, and what promise would keep it off the review list
     Monitoring        when a change in the promise rules means the model needs a review
 
-The model files and data are written by build_models.py, which checks them against the notebooks; every headline
-number on these pages is read from data/facts.json. The Olist data end in 2018, so the app scores held-out
-historical records as if they were new orders: the freight items come from the Problem 1 test set (the latest 20% of
-items, 24 May - 3 Sep 2018) and the orders from the Problem 2 test window (26 May - 29 Aug 2018), none of which the
-models saw in training.
+The app is the frontend of a two-part deployment. The models run in a separate service, the model API
+(deployment/api/main.py, FastAPI on Render), and this app holds no model files: the forms and CSV uploads send their
+inputs to the API, and the pages that show the whole test period (audit, tariff, queue, monitoring) read scores the API
+returned in a batch run (deployment/api/batch_score.py writes data/scored_*.csv and checks them against the build).
+Every headline number on these pages is read from data/facts.json, which build_models.py checks against the notebooks.
 
-Run locally:   streamlit run deployment/model_app/app.py
+The Olist data end in 2018, so the app scores held-out historical records as if they were new orders: the freight
+items come from the Problem 1 test set (the latest 20% of items, 24 May - 3 Sep 2018) and the orders from the Problem 2
+test window (26 May - 29 Aug 2018), none of which the models saw in training.
+
+Run locally:   uvicorn main:app --app-dir deployment/api --port 8000
+               API_URL=http://localhost:8000 streamlit run deployment/model_app/app.py
+The API address comes from st.secrets["API_URL"], else the API_URL environment variable, else the Render service.
 """
-import json, re, sys
+import json, os, re, time
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1] / "src"))
-import features as F, models as M            # the same feature and decision-rule code the notebook uses
 
 st.set_page_config(page_title="Olist logistics assistant", page_icon="📦", layout="wide")
 
 REPO_URL = "https://github.com/likeyou-ky/Team5_IT5006_Ecommerce_Analytics_AY2627Sem1"
 EDA_URL = "https://team5-olist-eda-phase1.streamlit.app/"
-MAX_UPLOAD_ROWS = 50_000
+DEFAULT_API_URL = "https://team5-olist-api.onrender.com"
+MAX_UPLOAD_ROWS = 20_000
+CHUNK = 2_000                       # rows per API call (the API takes at most 5,000)
+API_TIMEOUT = (10, 120)             # connect, read (s)
+WAKE_LIMIT = 90                     # s to wait for a sleeping free-tier service
 
 # Chart colours: the CVD-validated slots and diverging pair of src/olist_theme.py
 BLUE, ORANGE, GREY, INK, INK_2, GRID = "#2a78d6", "#eb6834", "#c3c2b7", "#10100f", "#52514e", "#e1e0d9"
@@ -57,42 +65,192 @@ DRIVER_GROUP = {"promised_days": "promise", "distance_km": "route", "same_state"
                 "n_items": "order", "n_sellers": "order"}
 ACTIONS = {"promise": "Update the delivery estimate", "route": "Check carrier tracking",
            "order": "Confirm dispatch with seller", None: "Send a tracking update"}
-RULES = {"overall": "Top 5% overall (notebook rule)", "band": "Top 5% within each price band (report)"}
+RULES = {"overall": "Top 5% overall (evaluated)", "band": "Top 5% within each price band (recommended)"}
 
 
 # ------------------------------------------------------------------ loading (cached, with a clear failure message)
-@st.cache_resource(show_spinner="Loading the models...")
-def load_models():
-    load = lambda name: joblib.load(HERE / "models" / name)
-    return load("freight_forest.joblib"), load("freight_ridge.joblib"), load("late_logit.joblib")
-
-
 @st.cache_data(show_spinner=False)
 def load_data():
+    """facts.json, and the held-out records joined to the scores the API returned for them (batch_score.py)."""
+    read = lambda f, **k: pd.read_csv(HERE / "data" / f, **k)
     facts = json.loads((HERE / "data" / "facts.json").read_text(encoding="utf-8"))
-    items = pd.read_csv(HERE / "data" / "heldout_items.csv", parse_dates=["order_purchase_timestamp"])
-    orders = pd.read_csv(HERE / "data" / "heldout_orders.csv", parse_dates=["order_purchase_timestamp"])
-    zips = pd.read_csv(HERE / "data" / "zip_centroids.csv").set_index("zip_prefix")
-    return facts, items, orders, zips
+    items = read("heldout_items.csv", parse_dates=["order_purchase_timestamp"]).merge(
+        read("scored_items.csv"), on=["order_id", "order_item_id"], how="left", validate="one_to_one")
+    orders = read("heldout_orders.csv", parse_dates=["order_purchase_timestamp"]).merge(
+        read("scored_orders.csv"), on="order_id", how="left", validate="one_to_one")
+    if items.expected.isna().any() or orders.risk.isna().any():
+        raise ValueError("some held-out records have no API score: re-run deployment/api/batch_score.py")
+    return facts, items, orders
 
 
 try:
-    MODEL, RIDGE, LOGIT = load_models()
-    FACTS, ITEMS, ORDERS, ZIPS = load_data()
+    FACTS, ITEMS, ORDERS = load_data()
 except Exception as exc:                                                    # missing or unreadable files
-    st.error("The app could not load its model or data files. Rebuild them with "
-             "`python deployment/model_app/build_models.py` and make sure the library versions match "
-             "`deployment/model_app/requirements.txt`.")
+    st.error("The app could not load its data files. Rebuild them with "
+             "`python deployment/model_app/build_models.py`, then score the held-out records through the API with "
+             "`python deployment/api/batch_score.py`.")
     st.exception(exc)
     st.stop()
 
 P1, P2, NB = FACTS["p1"], FACTS["p2"], FACTS["notebook"]
 FLAG = P1["flag"]
-COLS_A, COLS_B = list(MODEL.feature_names_in_), list(LOGIT.feature_names_in_)
-USES_LISTING = "photos_qty" in COLS_A           # listing details and purchase time: inputs only if the model kept them
-USES_TIMING = "purchase_month" in COLS_A
+COLS_A = P1["features_num"] + P1["features_cat"]
+USES_LISTING = "photos_qty" in COLS_A           # listing details: shown only if the model kept them
+DRIVER_COLS = [c for c in ORDERS.columns if c.startswith("drv_")]
 STATES = P1["states"]
 DAILY_YIELD = 1 / P2["daily"]["precision"]          # flagged orders checked per late order found, daily 10% list
+
+
+# ------------------------------------------------------------------ the model API: address, wake-up, calls
+def _api_url():
+    try:
+        url = st.secrets.get("API_URL")
+    except Exception:                                           # no secrets file (local runs)
+        url = None
+    return (url or os.environ.get("API_URL") or DEFAULT_API_URL).rstrip("/")
+
+
+API_URL = _api_url()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def api_health():
+    """(ok, health JSON or error) for the status indicator. Any request also wakes a sleeping service."""
+    try:
+        t0 = time.perf_counter()
+        r = requests.get(f"{API_URL}/", timeout=4)
+        r.raise_for_status()
+        return True, dict(r.json(), ms=(time.perf_counter() - t0) * 1000)
+    except Exception as e:
+        return False, str(e)
+
+
+def wake_api():
+    """Make sure the API answers. On Render's free tier it sleeps after 15 minutes without traffic, and the first
+    request takes 30-60 s while it starts: say so, and keep asking for up to WAKE_LIMIT seconds."""
+    if time.time() - st.session_state.get("api_ok_at", 0) < 240:
+        return True
+    try:
+        if requests.get(f"{API_URL}/", timeout=4).ok:
+            st.session_state.api_ok_at = time.time()
+            return True
+    except requests.RequestException:
+        pass
+    with st.status("Waking the API (30–60 s)…", expanded=True) as box:
+        st.write(f"The model service at {API_URL} sleeps after 15 minutes without traffic (Render's free tier); "
+                 f"the first request starts it again.")
+        t0 = time.time()
+        while time.time() - t0 < WAKE_LIMIT:
+            try:
+                if requests.get(f"{API_URL}/", timeout=20).ok:
+                    box.update(label=f"The API is awake ({time.time() - t0:.0f} s)", state="complete", expanded=False)
+                    st.session_state.api_ok_at = time.time()
+                    api_health.clear()
+                    return True
+            except requests.RequestException:
+                time.sleep(3)
+        box.update(label="The API did not answer", state="error")
+    st.error(f"The model API at {API_URL} did not answer within {WAKE_LIMIT} s. Try again in a minute.")
+    return False
+
+
+def api_call(method, path, payload=None, params=None, show_422=True):
+    """Call the API with a timeout and up to two retries. Returns (status, JSON); shows what went wrong."""
+    if not wake_api():
+        return None, None
+    for attempt in range(3):
+        try:
+            r = requests.request(method, f"{API_URL}{path}", json=payload, params=params, timeout=API_TIMEOUT)
+        except (requests.ConnectionError, requests.Timeout):
+            st.session_state.api_ok_at = 0                       # asleep again, or restarting: wake it and retry
+            if attempt < 2 and wake_api():
+                continue
+            st.error("The model API did not respond. Try again in a minute.")
+            return None, None
+        if r.status_code in (502, 503, 504) and attempt < 2:      # the service is (re)starting
+            time.sleep(5)
+            continue
+        if r.status_code == 422:
+            body = r.json()
+            if show_422:
+                st.error("The API rejected the input:\n\n" + "\n".join(f"- {e}" for e in body.get("errors", [body])))
+            return 422, body
+        if not r.ok:
+            st.error(f"The model API returned an error ({r.status_code}): {r.text[:300]}")
+            return r.status_code, None
+        st.session_state.api_ok_at = time.time()
+        return r.status_code, r.json()
+    return None, None
+
+
+def api_post(path, payload, params=None):
+    if not wake_api():
+        return None
+    with st.spinner("Asking the model API…"):
+        status, body = api_call("POST", path, payload, params)
+    return body if status == 200 else None
+
+
+def api_get(path):
+    if not wake_api():
+        return None
+    with st.spinner("Asking the model API…"):
+        status, body = api_call("GET", path)
+    return body if status == 200 else None
+
+
+def api_batch(path, key, rows, params=None):
+    """Score rows in chunks. Rows the API rejects are left out and reported: ({row: errors}, predictions by row)."""
+    preds, rejected = {}, {}
+    bar = st.progress(0.0, text="Scoring through the model API…") if len(rows) > CHUNK else None
+    for s in range(0, len(rows), CHUNK):
+        part = dict(enumerate(rows[s:s + CHUNK], start=s))
+        for _ in range(2):                                       # once as sent, once without the rejected rows
+            if not part:
+                break
+            status, body = api_call("POST", path, {key: list(part.values())}, params, show_422=False)
+            if status == 422:
+                keys = list(part)
+                bad = {}
+                for d, e in zip(body.get("detail", []), body.get("errors", [])):
+                    loc = d.get("loc", [])
+                    if len(loc) > 2 and isinstance(loc[2], int):
+                        bad.setdefault(keys[loc[2]], []).append(re.sub(r"^\w+\.\d+[.:]\s*", "", e))
+                if not bad:
+                    st.error("The API rejected the file: " + "; ".join(body.get("errors", [])[:3]))
+                    return None, None
+                rejected.update(bad)
+                part = {k: v for k, v in part.items() if k not in bad}
+                continue
+            if body is None:
+                return None, None
+            preds.update(zip(part, body["predictions"]))
+            break
+        if bar:
+            bar.progress(min(1.0, (s + CHUNK) / len(rows)), text="Scoring through the model API…")
+    if bar:
+        bar.empty()
+    return rejected, preds
+
+
+def show_notes(p):
+    """The API's notes on how it placed the inputs, and its drift warnings, for one result."""
+    if p["notes"]:
+        st.info("  \n".join(p["notes"]))
+    if p["drift_warnings"]:
+        st.warning("**Drift warning:** this input is unlike the training data, so treat the result with caution.\n\n"
+                   + "\n".join(f"- {w}" for w in p["drift_warnings"]))
+
+
+def flag_top_share(score, share, seed=FACTS["built"]["seed"]):
+    """The queue rule of src/models.py (copied, so the app needs no scikit-learn): flag the `share` highest scores,
+    breaking ties at random with a fixed seed."""
+    s = np.asarray(score, dtype=float)
+    tie = np.random.RandomState(seed).rand(len(s))
+    top = np.lexsort((tie, s))[::-1][:int(round(share * len(s)))]
+    out = np.zeros(len(s), dtype=int)
+    out[top] = 1
+    return out
 
 
 # ------------------------------------------------------------------ helpers
@@ -123,68 +281,25 @@ def how_to(text):
         st.markdown(text)
 
 
-def parse_zip(text):
-    """Zip-code prefix (first five digits of a CEP such as 01310-100), or None if empty; ValueError if malformed."""
-    digits = re.sub(r"\D", "", text or "")
-    if not digits:
-        return None
-    if len(digits) < 4:
-        raise ValueError(f"'{text}' is not a zip code (enter the first five digits of the CEP)")
-    return int(digits[:5])
-
-
-def locate(zip_text, state, who):
-    """(lat, lng, state, note) for a party, from its zip prefix if known, else the centre of its state."""
-    try:
-        z = parse_zip(zip_text)
-    except ValueError as e:
-        return None, str(e)
-    if z is None:
-        lat, lng = FACTS["state_centroids"][state]
-        return (lat, lng, state), None
-    # Zip codes are allocated by region: the first three digits fix the sub-region (one state in 861 of 862 cases),
-    # so an unknown prefix takes the nearest known one that shares them
-    same = ZIPS.index.values[ZIPS.index.values // 100 == z // 100]
-    if len(same) == 0:
-        lat, lng = FACTS["state_centroids"][state]
-        return (lat, lng, state), f"{who} zip {z:05d} is not in the Olist zip table: using the centre of {state}."
-    near = int(same[np.abs(same - z).argmin()])
-    row = ZIPS.loc[near]
-    notes = [] if near == z else [f"{who} zip {z:05d} is not in the Olist zip table: using the nearest one, {near:05d}"]
-    if row.state != state:
-        notes.append(f"{who.lower()} zip {near:05d} is in {row.state}, not {state}: using {row.state}")
-    note = "; ".join(notes)
-    return (row.lat, row.lng, row.state), (note[0].upper() + note[1:] + ".") if notes else None
-
-
-def place_inputs(prefix, label):
+def place_inputs(prefix, label, default="SP"):
+    """State and optional zip code of one party. The API places the party (and says how) from these."""
     c = st.columns(2)
-    state = c[0].selectbox(f"{label} state", STATES, index=STATES.index("SP"), key=f"{prefix}_state")
+    state = c[0].selectbox(f"{label} state", STATES, index=STATES.index(default), key=f"{prefix}_state")
     z = c[1].text_input(f"{label} zip code (optional)", key=f"{prefix}_zip", placeholder="e.g. 01310")
-    return z, state
+    return z.strip(), state
 
 
-def locate_pair(s_zip, s_state, c_zip, c_state):
-    """Seller and customer locations, with notes shown and errors returned."""
-    s_loc, s_note = locate(s_zip, s_state, "Seller")
-    c_loc, c_note = locate(c_zip, c_state, "Customer")
-    errors = [n for loc, n in [(s_loc, s_note), (c_loc, c_note)] if loc is None]
-    if not errors:
-        for n in (s_note, c_note):
-            if n:
-                st.info(n)
-    return s_loc, c_loc, errors
+def route_payload(s_zip, s_state, c_zip, c_state):
+    """The route fields of an API request; empty zip codes are left out, so the API uses the state centres."""
+    out = dict(seller_state=s_state, customer_state=c_state)
+    if s_zip:
+        out["seller_zip"] = s_zip
+    if c_zip:
+        out["customer_zip"] = c_zip
+    return out
 
 
-def range_note(values, ranges):
-    """Warn when an input lies outside the middle 99.8% of the training data."""
-    out = [f"{name} {v:,.2f} is outside the range seen in training ({lo:,.2f} to {hi:,.2f})"
-           for name, (v, (lo, hi)) in ((n, (values[n], ranges[n])) for n in values) if not lo <= v <= hi]
-    if out:
-        st.warning("The model has seen few cases like this, so treat the result with caution: " + "; ".join(out) + ".")
-
-
-# ------------------------------------------------------------------ Problem 1 scoring
+# ------------------------------------------------------------------ Problem 1 scores
 def error_band(price):
     """The test-set error of items at this price (the bands of the notebook's error-by-price table)."""
     for b, hi in zip(P1["price_bands"], [25, 50, 100, 200, 500, np.inf]):
@@ -193,54 +308,29 @@ def error_band(price):
     return P1["price_bands"][-1]
 
 
-def audit_band(price):
-    """Price band of the unusual-freight rule (the bands of the notebook's flag-rate table)."""
-    edges = [0] + FLAG["band_edges"] + [np.inf]
-    return pd.cut(pd.Series(np.atleast_1d(price), dtype=float), edges, labels=FLAG["band_labels"],
-                  right=False).astype(str).values
-
-
-def unusual(charged, expected, price, model, rule):
-    """Unusual freight: log residual at or above the cut-off of `model` ("model" = the forest, or "ridge")."""
-    cut = FLAG["cuts"][model]
-    thr = cut["overall"] if rule == "overall" else pd.Series(audit_band(price)).map(cut["band"]).values.astype(float)
-    res = np.log1p(np.atleast_1d(charged).astype(float)) - np.log1p(np.atleast_1d(expected).astype(float))
-    return res >= thr - FLAG["tol"]              # tolerance: see build_models.py
-
-
-def predict(model, df):
-    """Expected (fair) freight in R$ for rows holding the model's input columns."""
-    return np.clip(np.expm1(model.predict(df[COLS_A])), 0, None)
-
-
 def tariff(chargeable_kg, distance_km, same_state):
+    """The simple published tariff (coefficients from facts.json), for the tariff review."""
     t = P1["tariff"]
     return np.maximum(0.0, t["base"] + t["per_kg"] * np.asarray(chargeable_kg) + t["per_100km"]
                       * np.asarray(distance_km) / 100 + t["same_state"] * np.asarray(same_state))
 
 
 def add_scores(d, rule):
-    """Fair freight from both models, the unusual flags under `rule`, and the audit columns."""
+    """The API's unusual flags under `rule`, and the audit columns. `d` holds the API's fair freight (expected,
+    expected_ridge), its price band and its flags for both rules (unusual_<rule>, unusual_ridge_<rule>)."""
     d = d.copy()
-    if "expected" not in d:
-        d["expected"], d["expected_ridge"] = predict(MODEL, d), predict(RIDGE, d)
-    d["unusual"] = unusual(d.freight_value, d.expected, d.price, "model", rule)
-    d["unusual_ridge"] = unusual(d.freight_value, d.expected_ridge, d.price, "ridge", rule)
+    d["unusual"] = d[f"unusual_{rule}"].astype(bool)
+    d["unusual_ridge"] = d[f"unusual_ridge_{rule}"].astype(bool)
     d["both"] = d.unusual & d.unusual_ridge
     d["excess"] = d.freight_value - d.expected
     d["markup"] = np.where(d.expected > 0, d.freight_value / d.expected.where(d.expected > 0), np.nan)
-    d["band"] = audit_band(d.price)
+    d["band"] = d.audit_band
     return d
-
-
-@st.cache_data(show_spinner="Scoring the held-out items...")
-def heldout_predictions():
-    return ITEMS.assign(expected=predict(MODEL, ITEMS), expected_ridge=predict(RIDGE, ITEMS))
 
 
 @st.cache_data(show_spinner=False)
 def heldout_items_scored(rule):
-    return add_scores(heldout_predictions(), rule)
+    return add_scores(ITEMS, rule)
 
 
 def rule_picker():
@@ -248,20 +338,18 @@ def rule_picker():
     keys = list(RULES)
     choice = st.radio("Unusual-freight rule", keys, index=keys.index(st.session_state.get("rule", "overall")),
                       format_func=RULES.get, horizontal=True,
-                      help="Overall: the 5% of items with the largest charge above fair freight, as in the "
-                           "notebooks. Within each price band: 5% of every band, as the report recommends, so expensive "
-                           "items (harder to predict) do not crowd the review list.")
+                      help="Top 5% overall (evaluated): the 5% of items with the largest charge above fair freight; "
+                           "the rule the notebooks evaluate, and the one the headline audit numbers use. Top 5% within "
+                           "each price band (recommended): 5% of every price band, as the report recommends, so "
+                           "expensive items, whose freight is harder to predict, do not crowd the review list.")
     st.session_state.rule = choice
     return choice
 
 
-# ------------------------------------------------------------------ Problem 2 scoring
-@st.cache_data(show_spinner="Scoring the held-out orders...")
+# ------------------------------------------------------------------ Problem 2 scores
+@st.cache_data(show_spinner=False)
 def heldout_orders_scored():
-    d = ORDERS.copy()
-    d["risk"] = LOGIT.predict_proba(d[COLS_B])[:, 1]
-    d["day"] = d.order_purchase_timestamp.dt.normalize()
-    return d
+    return ORDERS.assign(day=ORDERS.order_purchase_timestamp.dt.normalize())
 
 
 @st.cache_data(show_spinner=False)
@@ -270,37 +358,22 @@ def daily_flags(share):
     d = heldout_orders_scored()
     flags = np.zeros(len(d), dtype=int)
     for _, idx in d.groupby("day").indices.items():
-        flags[idx] = M.flag_top_share(d.risk.values[idx], share)
+        flags[idx] = flag_top_share(d.risk.values[idx], share)
     return flags
 
 
-def percentile(risk):
-    """Where a risk score falls among the orders of the test window (0-100)."""
-    return np.interp(risk, P2["score_pct"], np.linspace(0, 100, 101))
+def drivers_of(row):
+    """One held-out order's driver contributions, as the API returned them (log-odds against an average order)."""
+    return row[DRIVER_COLS].iloc[0].rename(lambda c: c.removeprefix("drv_"))
 
 
-@st.cache_data(show_spinner=False)
-def _logit_reference():
-    return LOGIT.named_steps["prep"].transform(ORDERS[COLS_B]).mean(axis=0)
-
-
-def logit_drivers(rows):
-    """Each input's push on the log-odds of lateness, relative to the average order of the test window."""
-    prep, lr = LOGIT.named_steps["prep"], LOGIT.named_steps["m"]
-    names = prep.get_feature_names_out()
-    contrib = (prep.transform(rows[COLS_B]) - _logit_reference()) * lr.coef_.ravel()
-    raw = []
-    for n in names:
-        n = n.removeprefix("missingindicator_")
-        raw.append(next((c for c in ("seller_state", "customer_state") if n.startswith(c + "_")), n))
-    return pd.DataFrame(contrib, columns=names, index=rows.index).T.groupby(raw).sum().T
-
-
-def suggested_actions(rows):
-    """The follow-up for each order, from the group of inputs that raises its risk most."""
-    groups = logit_drivers(rows).T.groupby(lambda c: DRIVER_GROUP.get(c, "order")).sum().T
-    top = groups.idxmax(axis=1).where(groups.max(axis=1) > 0)
-    return top.map(lambda g: ACTIONS[g if isinstance(g, str) else None])
+def order_payload(row):
+    """API fields of one held-out order. A missing distance is sent as null: the model imputes it, as in training."""
+    r = row.iloc[0]
+    return dict(promised_days=float(r.promised_days), price_total=float(r.price_total),
+                freight_total=float(r.freight_total), n_items=int(r.n_items), n_sellers=int(r.n_sellers),
+                seller_state=r.seller_state, customer_state=r.customer_state,
+                distance_km=None if pd.isna(r.distance_km) else float(r.distance_km))
 
 
 def drivers_chart(contrib, title):
@@ -317,26 +390,29 @@ def drivers_chart(contrib, title):
     return layout(fig, h=60 + 34 * len(s), title=title, bargap=0.35)
 
 
-def promise_curve(row, line, measure):
-    """Risk of one order for every promise from 3 to 60 days, and the shortest promise that falls below `line`.
+def promise_curve(base, line, measure):
+    """Risk of one order for every promise from 3 to 60 days (one /late/batch call with 58 variants of the order),
+    and the shortest promise that falls below `line`.
 
     measure="pct": risk as a percentile among test-window orders (a new order at checkout);
     measure="risk": the raw score, for a line set by one day's queue.
     """
     days = np.arange(3, 61)
-    rows = pd.concat([row] * len(days), ignore_index=True).assign(promised_days=days.astype(float))
-    risk = LOGIT.predict_proba(rows[COLS_B])[:, 1]
-    y = percentile(risk) if measure == "pct" else risk
+    res = api_post("/late/batch", {"orders": [dict(base, promised_days=float(d)) for d in days]})
+    if res is None:
+        return None, None
+    y = np.array([p["percentile" if measure == "pct" else "risk"] for p in res["predictions"]])
     ok = days[y < line]
     return pd.DataFrame({"days": days, "y": y}), (int(ok.min()) if len(ok) else None)
 
 
-def promise_section(row, line, measure, line_label, title):
-    """Promise what-if: the lever the Phase 2 analysis found strongest."""
-    curve, safe = promise_curve(row, line, measure)
-    now = float(row.promised_days.iloc[0])
-    now_risk = LOGIT.predict_proba(row[COLS_B])[:, 1]
-    now_y = float(percentile(now_risk)[0] if measure == "pct" else now_risk[0])
+def promise_section(base, now_y, line, measure, line_label, title):
+    """Promise what-if: the lever the Phase 2 analysis found strongest. `base` holds the order's API fields and
+    `now_y` its current risk (percentile or score)."""
+    curve, safe = promise_curve(base, line, measure)
+    if curve is None:
+        return
+    now = float(base["promised_days"])
     pct = measure == "pct"
     fig = go.Figure()
     fig.add_scatter(x=curve.days, y=curve.y, mode="lines", line=dict(color=BLUE, width=2), name="risk",
@@ -370,6 +446,9 @@ def home():
         "Decision tools for the two teams our project serves, each built on the final model of one of our two problems. "
         "The Olist data end in 2018, so the tools score **held-out historical records as if they were new**: freight "
         "items and orders the models never saw in training.")
+    st.caption(f"The models run in a separate service, the [model API]({API_URL}/docs) (FastAPI on Render), which "
+               f"this app calls: forms and uploads are scored live, and the population pages show scores the API "
+               f"returned in a batch run. See **Model service** for its status and live statistics.")
     a, b = st.columns(2, gap="large")
     with a:
         st.subheader("Logistics-pricing / finance analyst")
@@ -405,63 +484,95 @@ def home():
         "2. The data are historical: a *day* in the queue is a day between 26 May and 29 Aug 2018, and *Reveal what "
         "happened* shows the outcome nobody knew at checkout.\n"
         "3. Forms take a listing or an order you describe; zip codes place seller and customer exactly, otherwise the "
-        "centre of the state is used.\n"
+        "centre of the state is used. The API checks every input and warns when one is unlike the training data.\n"
         "4. Lists can be downloaded as CSV for follow-up. The **Model card** gives the data, validation, test results "
-        "and limits of every model.")
+        "and limits of every model.\n"
+        "5. The API sleeps after 15 minutes without traffic: the first form you submit may take 30–60 seconds while it "
+        "wakes up. The status in the sidebar shows whether it is awake.")
     st.caption(f"Team 5 · IT5006 · AY2026/27. Code: [GitHub]({REPO_URL}). "
                f"Exploratory analysis (Phase 1): [EDA dashboard]({EDA_URL}).")
 
 
 # ------------------------------------------------------------------ Analyst: freight audit
+UPLOAD_NUM = ["price", "freight_value", "weight_kg", "volume_cm3", "distance_km", "n_items", "n_sellers"]
+ZIP_COLS = {"seller_zip_prefix": "seller_zip", "customer_zip_prefix": "customer_zip"}
+n_rows = lambda n: f"{n:,} row{'s' if n != 1 else ''}"
+
+
 def read_upload(file):
-    """Validate an uploaded CSV and derive the model's inputs; returns (frame, messages) or raises ValueError."""
+    """Read an uploaded CSV of items into API rows; returns (frame, rows, messages) or raises ValueError. Only the
+    layout is checked here: the API validates every row, places the parties and flags drift."""
     try:
-        u = pd.read_csv(file)
+        u = pd.read_csv(file, dtype={c: str for c in ["seller_zip", "customer_zip", *ZIP_COLS]})
     except Exception as e:
         raise ValueError(f"the file could not be read as CSV ({e}).")
+    if u.empty:
+        raise ValueError("the file has no rows.")
+    u = u.rename(columns=ZIP_COLS).assign(file_row=lambda t: np.arange(len(t)) + 1)
     msgs = []
     if len(u) > MAX_UPLOAD_ROWS:
         msgs.append(f"only the first {MAX_UPLOAD_ROWS:,} of {len(u):,} rows are scored.")
         u = u.head(MAX_UPLOAD_ROWS)
-    text_cols = ("order_id", "seller_id", "seller_state", "customer_state", "category")
-    for c in u.columns:                                         # numbers first, so text in a number column -> NaN
-        if c not in text_cols:
-            u[c] = pd.to_numeric(u[c], errors="coerce")
-    if "distance_km" not in u and {"seller_zip_prefix", "customer_zip_prefix"} <= set(u):
-        s, c = ZIPS.reindex(u.seller_zip_prefix.values), ZIPS.reindex(u.customer_zip_prefix.values)
-        u["distance_km"] = F.haversine_km(s.lat.values, s.lng.values, c.lat.values, c.lng.values)
-    if "chargeable_kg" not in u and {"weight_kg", "volume_cm3"} <= set(u):
-        u["chargeable_kg"] = np.maximum(u.weight_kg, u.volume_cm3 / 5000)
-    if "same_state" not in u and {"seller_state", "customer_state"} <= set(u):
-        u["same_state"] = (u.seller_state == u.customer_state).astype(int)
-    need = [c for c in COLS_A if c not in ("order_id", "purchase_ts")] + ["freight_value"]
-    missing = [c for c in need if c not in u]
+    missing = [c for c in ["price", "freight_value", "weight_kg", "volume_cm3", "seller_state", "customer_state"]
+               if c not in u]
     if missing:
         raise ValueError("missing columns: " + ", ".join(missing) + ". Download the template for the layout.")
-    if "order_id" not in u:
-        u["order_id"] = [f"row {i + 1}" for i in range(len(u))]
-    u["purchase_ts"] = 0.0                                                   # a split key only, not a model input
-    if "seller_id" not in u:
-        u["seller_id"] = "unknown"
-    num = [c for c in need if c not in ("seller_state", "customer_state", "category")]
-    bad = (u[["price", "freight_value"]].isna().any(axis=1) | (u.price <= 0) | (u.freight_value < 0)
-           | (u[[c for c in num if c not in ("price", "freight_value")]] < 0).any(axis=1))
-    if bad.any():
-        msgs.append(f"{bad.sum():,} row{'s' if bad.sum() != 1 else ''} with a missing or negative price or freight, "
-                    f"or a negative input, {'were' if bad.sum() != 1 else 'was'} skipped.")
-        u = u[~bad]
-    rows = lambda n: f"{n:,} row{'s' if n != 1 else ''}"
-    gaps = u[[c for c in num if c not in ("price", "freight_value")]].isna().any(axis=1).sum()
-    if gaps:
-        msgs.append(f"{rows(gaps)} had a missing or non-numeric input; the model fills it with the training median.")
-    unknown = (~u.category.isin(P1["categories"])).sum()
-    if unknown:
-        msgs.append(f"{rows(unknown)} had a category the model has not seen; it treats it as a rare category.")
+    for c in UPLOAD_NUM:
+        if c in u:
+            u[c] = pd.to_numeric(u[c], errors="coerce")             # text in a number column -> missing
+    zips = {"seller_zip", "customer_zip"} <= set(u)
+    if "distance_km" not in u and not zips:
+        msgs.append("the file has neither `distance_km` nor both zip-code columns, so distances are measured between "
+                    "the centres of the states.")
+    no_charge = u.freight_value.isna()
+    if no_charge.any():
+        msgs.append(f"{n_rows(no_charge.sum())} without a charged freight {'were' if no_charge.sum() != 1 else 'was'} "
+                    f"skipped: the audit compares the charge with the fair freight.")
+        u = u[~no_charge]
     if u.empty:
-        raise ValueError("no valid rows left to score.")
-    for c in ("seller_state", "customer_state", "category", "order_id", "seller_id"):
-        u[c] = u[c].astype(str)
-    return u.reset_index(drop=True), msgs
+        raise ValueError("no row has a charged freight to check.")
+    u = u.reset_index(drop=True)
+    u["order_id"] = u.order_id.astype(str) if "order_id" in u else [f"row {i}" for i in u.file_row]
+    u["seller_id"] = u.seller_id.astype(str) if "seller_id" in u else "unknown"
+    fields = [c for c in ["category", *UPLOAD_NUM, "seller_state", "customer_state", "seller_zip", "customer_zip"]
+              if c in u]
+    rows = []
+    for r in u[fields].to_dict("records"):
+        # Empty cells are left out, so the API applies its defaults (1 item, 1 seller, category "unknown"). A blank
+        # distance with no zip codes stays null: the distance is unknown and the model imputes it, as in training.
+        row = {k: v for k, v in r.items() if not (v is None or (isinstance(v, float) and np.isnan(v)))}
+        if "distance_km" in r and "distance_km" not in row and not ("seller_zip" in row and "customer_zip" in row):
+            row["distance_km"] = None
+        rows.append(row)
+    return u, rows, msgs
+
+
+def score_upload(u, rows):
+    """Score the uploaded rows through /freight/batch; returns (frame with the audit columns, messages)."""
+    rejected, preds = api_batch("/freight/batch", "items", rows)
+    if preds is None:
+        return None, []
+    msgs = []
+    if rejected:
+        ex = "; ".join(f"row {u.file_row[i]}: {', '.join(e)}" for i, e in list(rejected.items())[:3])
+        msgs.append(f"The API rejected {n_rows(len(rejected))}, which {'were' if len(rejected) != 1 else 'was'} "
+                    f"skipped ({ex}{'; …' if len(rejected) > 3 else ''}).")
+    keep = sorted(preds)
+    P = [preds[i] for i in keep]
+    d = u.loc[keep].reset_index(drop=True).assign(
+        **{c: [p["inputs"][c] for p in P] for c in ["category", "seller_state", "customer_state", "distance_km",
+                                                     "chargeable_kg", "same_state", "n_items", "n_sellers"]},
+        expected=[p["fair_freight"] for p in P], expected_ridge=[p["fair_freight_ridge"] for p in P],
+        audit_band=[p["check"]["audit_band"] for p in P],
+        **{f"unusual{'_ridge' if m == 'ridge' else ''}_{rule}": [p["check"]["rules"][rule][m] for p in P]
+           for rule in RULES for m in ("forest", "ridge")},
+        drift=["; ".join(p["drift_warnings"]) for p in P])
+    n_drift = int((d.drift != "").sum())
+    if n_drift:
+        top = pd.Series([w.split(" ")[0] for p in P for w in p["drift_warnings"]]).value_counts().head(4)
+        msgs.append(f"{n_rows(n_drift)} had inputs unlike the training data (drift warnings on "
+                    f"{', '.join(f'{k} ({v:,})' for k, v in top.items())}): treat their flags with caution.")
+    return d, msgs
 
 
 def audit_page():
@@ -471,11 +582,13 @@ def audit_page():
         "freight; an item is **unusual** when its charge sits in the top 5% above it. The Ridge model gives an "
         "independent second opinion, and items both models flag are reviewed first.")
     how_to(
-        "1. Choose the items: all held-out items (the test set), or a CSV of your own with the charged freight "
-        "(download the template for the columns; `distance_km` may be replaced by `seller_zip_prefix` and "
-        "`customer_zip_prefix`).\n"
-        "2. Choose the rule. *Within each price band* keeps expensive items, which are harder to predict, from "
-        "crowding the list.\n"
+        "1. Choose the items: all held-out items (the test set, scored by the model API in a batch run), or a CSV of "
+        f"your own with the charged freight, which the app sends to the API (up to {MAX_UPLOAD_ROWS:,} rows; download "
+        "the template for the columns; `distance_km` may be replaced by `seller_zip_prefix` and "
+        "`customer_zip_prefix`). Rows the API rejects are skipped and listed, and rows with inputs unlike the "
+        "training data are counted.\n"
+        "2. Choose the rule. *Top 5% overall* is the rule the notebooks evaluated; *top 5% within each price band*, "
+        "the one the report recommends, keeps expensive items, which are harder to predict, from crowding the list.\n"
         "3. **Sellers to audit** ranks sellers by the *share* of their items that are unusual (with a minimum number "
         "of items), not by volume: large sellers mostly price freight consistently.\n"
         "4. **Items to review** lists the unusual items, those flagged by both models first. Download either list.\n\n"
@@ -493,14 +606,24 @@ def audit_page():
         file = st.file_uploader("CSV of order items", type="csv")
         if file is None:
             return
-        try:
-            raw, msgs = read_upload(file)
-        except ValueError as e:
-            st.error(f"The upload could not be scored: {e}")
-            return
+        key = getattr(file, "file_id", None) or f"{file.name}:{file.size}"
+        if st.session_state.get("upload_key") != key:              # score each file once, not on every rerun
+            try:
+                u, rows, msgs = read_upload(file)
+            except ValueError as e:
+                st.error(f"The upload could not be scored: {e}")
+                return
+            scored, more = score_upload(u, rows)
+            if scored is None:
+                return
+            st.session_state.upload_key, st.session_state.upload = key, (scored, msgs + more)
+        scored, msgs = st.session_state.upload
         for m in msgs:
             st.warning(m)
-        d = add_scores(raw, rule)
+        if scored.empty:
+            st.error("No row of the file could be scored.")
+            return
+        d = add_scores(scored, rule)
     else:
         d = heldout_items_scored(rule)
     f = d[d.unusual]
@@ -575,7 +698,8 @@ def audit_page():
                      "excess": st.column_config.NumberColumn("excess", format="R$ %.2f"),
                      "markup": st.column_config.NumberColumn("markup", format="%.2f×")})
     out = items[["priority", "models", "order_id", "seller_id", "category", "price", "freight_value", "expected",
-                 "expected_ridge", "excess", "markup", "weight_kg", "distance_km", "seller_state", "customer_state"]]
+                 "expected_ridge", "excess", "markup", "weight_kg", "distance_km", "seller_state", "customer_state"]
+                + (["drift"] if "drift" in items else [])]
     st.download_button("Download the review list (CSV)", out.round(2).to_csv(index=False), "items_to_review.csv",
                        "text/csv")
 
@@ -611,17 +735,15 @@ def audit_page():
 
 
 # ------------------------------------------------------------------ Analyst: check a charge
-def verdict(charged, expected, expected_ridge, price, rule):
-    band = error_band(price)
+def verdict(charged, expected, expected_ridge, band, model_flag, ridge_flag):
+    """The charge against the fair freight, and the unusual-freight verdict (the flags are the API's)."""
     c = st.columns(4)
     c[0].metric("Charged", money(charged))
     c[1].metric("Fair freight", money(expected))
     c[2].metric("Difference", money(charged - expected),
                 f"{(charged / expected - 1) * 100:+.0f}%" if expected > 0 else None, delta_color="inverse")
     c[3].metric(f"Typical error at R$ {band['band']}", f"± {money(band['mae'])}")
-    model_flag = bool(unusual(charged, expected, price, "model", rule)[0])
-    ridge_flag = bool(unusual(charged, expected_ridge, price, "ridge", rule)[0])
-    second = (f"The Ridge model agrees (it expects {md_money(expected_ridge)})." if ridge_flag == model_flag else
+    second =(f"The Ridge model agrees (it expects {md_money(expected_ridge)})." if ridge_flag == model_flag else
               f"The Ridge model disagrees (it expects {md_money(expected_ridge)}).")
     if model_flag:
         st.error(f"🚩 **Unusual freight:** {md_money(charged)} is in the top 5% above the fair freight of "
@@ -664,13 +786,15 @@ def check_item(rule):
     it = d.loc[st.session_state.item_id]
     st.markdown(f"**Order `{it.order_id}`**, item {it.order_item_id} · {it.category} · seller `{it.seller_id[:8]}` · "
                 f"purchased {it.order_purchase_timestamp:%d %b %Y}")
-    verdict(it.freight_value, it.expected, it.expected_ridge, it.price, rule)
-    st.caption(f"A simple published tariff would charge "
-               f"{md_money(float(tariff(it.chargeable_kg, it.distance_km, it.same_state)))}; it errs by "
-               f"{md_money(P1['tariff']['mae'])} on average, against {md_money(P1['test']['MAE_rs'])} for the forest.")
+    verdict(it.freight_value, it.expected, it.expected_ridge, error_band(it.price), it.unusual, it.unusual_ridge)
+    if pd.notna(it.distance_km):
+        st.caption(f"A simple published tariff would charge "
+                   f"{md_money(float(tariff(it.chargeable_kg, it.distance_km, it.same_state)))}; it errs by "
+                   f"{md_money(P1['tariff']['mae'])} on average, against {md_money(P1['test']['MAE_rs'])} for the forest.")
     rows = [("Price", money(it.price)), ("Weight", f"{it.weight_kg:,.2f} kg"), ("Volume", f"{it.volume_cm3:,.0f} cm³"),
             ("Chargeable weight", f"{it.chargeable_kg:,.2f} kg"), ("Route", f"{it.seller_state} → {it.customer_state}"),
-            ("Distance", f"{it.distance_km:,.0f} km"), ("Category", it.category),
+            ("Distance", f"{it.distance_km:,.0f} km" if pd.notna(it.distance_km) else
+             "unknown (zip code not in the Olist table): the model uses the training median"), ("Category", it.category),
             ("Items / sellers in the order", f"{it.n_items} / {it.n_sellers}")]
     if USES_LISTING:
         rows.append(("Photos, name and description length",
@@ -680,8 +804,10 @@ def check_item(rule):
 
 
 def quote_listing(rule):
-    how_to("Describe the item and the route, then press **Estimate** for the fair freight and a quote range "
-           "(fair freight ± the typical error at that price). Enter the charged freight to check it as well.")
+    how_to("Describe the item and the route, then press **Estimate**. The app sends the listing to the model API "
+           "(`POST /freight/predict`), which returns the fair freight and a quote range (fair freight ± the typical "
+           "error at that price). Enter the charged freight to check it as well. The API rejects impossible inputs "
+           "with a reason, and warns when an input is unlike the training data.")
     with st.form("listing"):
         a, b = st.columns(2, gap="large")
         with a:
@@ -694,52 +820,39 @@ def quote_listing(rule):
             height = d3.number_input("Height (cm)", min_value=0.0, value=15.0)
         with b:
             s_zip, s_state = place_inputs("s", "Seller")
-            c_zip, c_state = place_inputs("c", "Customer")
+            c_zip, c_state = place_inputs("c", "Customer", "RJ")
             e1, e2 = st.columns(2)
             n_items = e1.number_input("Items in the order", min_value=1, value=1)
             n_sellers = e2.number_input("Sellers in the order", min_value=1, value=1)
-            day, hour = pd.Timestamp("2018-08-01"), 14
-            if USES_TIMING:
-                w1, w2 = st.columns(2)
-                day = w1.date_input("Purchase date", value=day)
-                hour = w2.slider("Purchase hour", 0, 23, hour)
-        photos, name_len, desc_len = (int(P1["defaults"][c]) for c in ("photos_qty", "name_len", "desc_len"))
-        if USES_LISTING:
-            with st.expander("Listing details (training medians by default)"):
-                l1, l2, l3 = st.columns(3)
-                photos = l1.number_input("Photos", min_value=0, value=photos)
-                name_len = l2.number_input("Name length (characters)", min_value=0, value=name_len)
-                desc_len = l3.number_input("Description length (characters)", min_value=0, value=desc_len)
         charged = st.number_input("Freight charged (R$, optional: leave 0 to skip the check)", min_value=0.0, value=0.0)
         go_ = st.form_submit_button("Estimate", type="primary")
     if not go_:
         return
-    errors = [m for m, bad in [("price must be above zero", price <= 0), ("weight must be above zero", weight_g <= 0),
-                               ("every dimension must be above zero", min(length, width, height) <= 0)] if bad]
-    s_loc, c_loc, loc_errors = locate_pair(s_zip, s_state, c_zip, c_state)
-    if errors + loc_errors:
-        st.error("Please fix: " + "; ".join(errors + loc_errors) + ".")
-        return
-    when = pd.Timestamp(day) + pd.Timedelta(hours=hour)
-    wkg, vol = weight_g / 1000, length * width * height
-    row = pd.DataFrame([dict(weight_kg=wkg, volume_cm3=vol, chargeable_kg=max(wkg, vol / 5000),
-                             distance_km=float(F.haversine_km(s_loc[0], s_loc[1], c_loc[0], c_loc[1])),
-                             same_state=int(s_loc[2] == c_loc[2]), price=price, n_items=n_items, n_sellers=n_sellers,
-                             photos_qty=photos, name_len=name_len, desc_len=desc_len, purchase_month=when.month,
-                             purchase_dow=when.dayofweek, purchase_hour=when.hour, seller_state=s_loc[2],
-                             customer_state=c_loc[2], category=cat, order_id="new", purchase_ts=when.timestamp())])
-    range_note({"weight_kg": wkg, "volume_cm3": vol, "price": price, "distance_km": row.distance_km[0]}, P1["ranges"])
-    expected, expected_ridge = float(predict(MODEL, row)[0]), float(predict(RIDGE, row)[0])
-    band = error_band(price)
-    st.markdown(f"**{cat}**, {wkg:,.2f} kg, {vol:,.0f} cm³, {s_loc[2]} → {c_loc[2]} ({row.distance_km[0]:,.0f} km)")
-    c = st.columns(3)
-    c[0].metric("Fair freight", money(expected))
-    c[1].metric("Quote range (R$)", f"{max(0, expected - band['mae']):,.0f} – {expected + band['mae']:,.0f}",
-                help=f"Fair freight ± the average test-set error for items priced R$ {band['band']}")
-    c[2].metric("Simple tariff", money(float(tariff(row.chargeable_kg[0], row.distance_km[0], row.same_state[0]))))
+    payload = dict(category=cat, price=price, weight_kg=weight_g / 1000, volume_cm3=length * width * height,
+                   n_items=int(n_items), n_sellers=int(n_sellers), **route_payload(s_zip, s_state, c_zip, c_state))
     if charged > 0:
-        verdict(charged, expected, expected_ridge, price, rule)
-    st.caption(f"For a listing the model has never seen, the average error is {md_money(NB['p1_unseen_mae'])} "
+        payload["freight_value"] = charged
+    p = api_post("/freight/predict", payload)
+    if p is None:
+        return
+    show_notes(p)
+    x = p["inputs"]
+    st.markdown(f"**{cat}**, {x['weight_kg']:,.2f} kg, {x['volume_cm3']:,.0f} cm³, {x['seller_state']} → "
+                f"{x['customer_state']} ({x['distance_km']:,.0f} km)")
+    c = st.columns(3)
+    c[0].metric("Fair freight", money(p["fair_freight"]))
+    c[1].metric("Quote range (R$)", f"{p['quote_low']:,.0f} – {p['quote_high']:,.0f}",
+                help=f"Fair freight ± the average test-set error for items priced R$ {p['price_band']}")
+    c[2].metric("Simple tariff", money(p["tariff"]))
+    if p["check"]:
+        r = p["check"]["rules"][rule]
+        verdict(charged, p["fair_freight"], p["fair_freight_ridge"], dict(band=p["price_band"], mae=p["band_mae"]),
+                r["forest"], r["ridge"])
+        other = "band" if rule == "overall" else "overall"
+        st.caption(f"Under the other rule ({RULES[other]}): "
+                   f"{p['check']['rules'][other]['verdict'].replace('_', ' ')}.")
+    st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms. "
+               f"For a listing the model has never seen, the average error is {md_money(NB['p1_unseen_mae'])} "
                f"({NB['p1_unseen_pct']}% of their mean freight; Phase 3 notebook, Section 6).")
 
 
@@ -759,8 +872,9 @@ def tariff_page():
         f"charge above it?")
     how_to("Pick what to compare with the fair freight. Each cell is a group of held-out items by distance and "
            "chargeable weight; red means more than the fair freight, blue less. Cells with fewer than 30 items are "
-           "left blank. Use it to see which lanes a simple tariff would misprice before publishing one.")
-    d = heldout_predictions()
+           "left blank. Use it to see which lanes a simple tariff would misprice before publishing one. The fair "
+           "freight of every held-out item comes from the model API's batch run.")
+    d = ITEMS
     comp = st.radio("Compare fair freight with", ["the published tariff", "what sellers charged"], horizontal=True)
     other = (tariff(d.chargeable_kg.fillna(d.chargeable_kg.median()), d.distance_km.fillna(d.distance_km.median()),
                     d.same_state) if comp == "the published tariff" else d.freight_value.values)
@@ -814,8 +928,10 @@ def queue_page():
         f"2. Work down the list. Each order has a **suggested follow-up** from its biggest risk driver: a short "
         f"promise, a risky lane or a large or multi-seller order. Keep them cheap: only about one checked order in "
         f"{DAILY_YIELD:.0f} is really late.\n"
-        f"3. Pick an order to see why it is on the list and what promise would have kept it off.\n"
-        f"4. Download the list for the team, or switch on **Reveal what happened** to see the real outcomes.")
+        f"3. Pick an order to see why it is on the list and what promise would have kept it off (the app asks the "
+        f"model API for the order's risk under every promise from 3 to 60 days).\n"
+        f"4. Download the list for the team, or switch on **Reveal what happened** to see the real outcomes.\n\n"
+        f"The scores, drivers and follow-ups of the test window come from the model API's batch run.")
     d = heldout_orders_scored()
     days = d.day.drop_duplicates().sort_values()
     c = st.columns([1, 1, 1])
@@ -847,11 +963,10 @@ def queue_page():
         st.warning(f"With {len(today)} orders, a {share:.0%} capacity rounds to nobody: raise the capacity or pick a "
                    f"busier day.")
         return
-    actions = suggested_actions(flagged)
     show = today.assign(rank=np.arange(1, len(today) + 1), order=today.order_id.str[:8],
                         placed=today.order_purchase_timestamp.dt.strftime("%H:%M"),
                         route=today.seller_state + " → " + today.customer_state,
-                        action=actions.reindex(today.index).fillna(""))
+                        action=today.action.where(today.flag == 1, ""))
     cols = ["rank", "action", "order", "placed", "route", "distance_km", "promised_days", "price_total",
             "freight_total", "risk"]
     if reveal:
@@ -879,13 +994,13 @@ def queue_page():
     row = today[today.order_id.str[:8] == pick].head(1)
     a, b = st.columns(2, gap="large")
     with a:
-        st.plotly_chart(drivers_chart(logit_drivers(row).iloc[0], f"What drives order {pick}'s risk"), width="stretch")
-        st.markdown(f"Suggested follow-up: **{actions.loc[row.index[0]]}**.")
+        st.plotly_chart(drivers_chart(drivers_of(row), f"What drives order {pick}'s risk"), width="stretch")
+        st.markdown(f"Suggested follow-up: **{row.action.iloc[0]}**.")
     with b:
         # off the list = less risky than the riskiest order the day's list leaves out
         line = float(today.loc[today.flag == 0, "risk"].max())
-        promise_section(row, line, "risk", f"today's review line ({share:.0%} capacity)",
-                        "What promise would have kept it off the list?")
+        promise_section(order_payload(row), float(row.risk.iloc[0]), line, "risk",
+                        f"today's review line ({share:.0%} capacity)", "What promise would have kept it off the list?")
 
     if reveal:
         st.divider()
@@ -933,40 +1048,39 @@ def promise_page():
             n_sellers = e2.number_input("Sellers", min_value=1, value=1)
         with b:
             s_zip, s_state = place_inputs("os", "Seller")
-            c_zip, c_state = place_inputs("oc", "Customer")
+            c_zip, c_state = place_inputs("oc", "Customer", "RJ")
             share = st.select_slider("Review capacity", [0.05, 0.10, 0.15, 0.20, 0.25, 0.30], value=P2["share"],
                                      format_func=lambda v: f"{v:.0%}", help="The share of orders the team can check")
         go_ = st.form_submit_button("Score", type="primary")
     if not go_:
         return
-    errors = ["order value must be above zero"] if value <= 0 else []
-    s_loc, c_loc, loc_errors = locate_pair(s_zip, s_state, c_zip, c_state)
-    if errors + loc_errors:
-        st.error("Please fix: " + "; ".join(errors + loc_errors) + ".")
+    payload = dict(promised_days=promised, price_total=value, freight_total=freight, n_items=int(n_items),
+                   n_sellers=int(n_sellers), **route_payload(s_zip, s_state, c_zip, c_state))
+    p = api_post("/late/predict", payload, params={"share": share})
+    if p is None:
         return
-    dist = float(F.haversine_km(s_loc[0], s_loc[1], c_loc[0], c_loc[1]))
-    row = pd.DataFrame([dict(promised_days=promised, distance_km=dist, same_state=int(s_loc[2] == c_loc[2]),
-                             price_total=value, freight_total=freight, freight_ratio=freight / value,
-                             n_items=n_items, n_sellers=n_sellers, seller_state=s_loc[2], customer_state=c_loc[2],
-                             order_id="new", purchase_ts=0.0)])
-    range_note({"promised_days": promised, "price_total": value, "freight_total": freight, "distance_km": dist},
-               P2["ranges"])
-    risk = float(LOGIT.predict_proba(row[COLS_B])[0, 1])
-    pct = float(percentile(risk))
-    st.markdown(f"**{s_loc[2]} → {c_loc[2]}**, {dist:,.0f} km, promised {promised:.0f} days")
+    show_notes(p)
+    x = p["inputs"]
+    st.markdown(f"**{x['seller_state']} → {x['customer_state']}**, {x['distance_km']:,.0f} km, promised "
+                f"{promised:.0f} days")
     c = st.columns(3)
-    c[0].metric("Risk score", f"{risk:.3f}")
-    c[1].metric("Risk percentile", f"{pct:.0f}th", help="Among the orders of the test window")
+    c[0].metric("Risk score", f"{p['risk']:.3f}")
+    c[1].metric("Risk percentile", f"{p['percentile']:.0f}th", help="Among the orders of the test window")
     c[2].metric("Review line", f"{100 * (1 - share):.0f}th", help=f"The riskiest {share:.0%} of orders are checked")
-    if pct >= 100 * (1 - share):
-        st.error(f"🔎 **On the review list:** it would be in the riskiest {share:.0%} of orders.")
+    if p["on_review_list"]:
+        st.error(f"🔎 **On the review list:** it would be in the riskiest {share:.0%} of orders. Suggested follow-up: "
+                 f"**{p['suggested_follow_up']}**.")
     else:
         st.success(f"✅ **Below the review line** for a {share:.0%} capacity.")
     a, b = st.columns(2, gap="large")
     with a:
-        promise_section(row, 100 * (1 - share), "pct", f"review line (riskiest {share:.0%})", "Risk for every promise")
+        base = {k: x[k] for k in ("promised_days", "price_total", "freight_total", "distance_km", "n_items",
+                                  "n_sellers", "seller_state", "customer_state")}
+        promise_section(base, p["percentile"], 100 * (1 - share), "pct", f"review line (riskiest {share:.0%})",
+                        "Risk for every promise")
     with b:
-        st.plotly_chart(drivers_chart(logit_drivers(row).iloc[0], "What drives this order's risk"), width="stretch")
+        st.plotly_chart(drivers_chart(pd.Series(p["drivers"]), "What drives this order's risk"), width="stretch")
+    st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms.")
 
 
 # ------------------------------------------------------------------ Operations: monitoring
@@ -1032,8 +1146,8 @@ def monitor_page():
 def model_card():
     st.title("📋 Model card")
     st.markdown("What each model was trained on, how it was validated and where it should not be trusted. Test "
-                "results are recomputed by `build_models.py` from the files this app loads; cross-validation and robustness "
-                "results are quoted from the notebooks (Problem 1: Phase 3; Problem 2: Phase 2).")
+                "results are recomputed by `build_models.py` from the model files the API loads; cross-validation and "
+                "robustness results are quoted from the notebooks (Problem 1: Phase 3; Problem 2: Phase 2).")
     a, b = st.columns(2, gap="large")
     with a:
         st.subheader("Problem 1 · Fair freight")
@@ -1114,8 +1228,126 @@ def model_card():
     st.divider()
     b_ = FACTS["built"]
     st.caption(f"Models built {b_['date']} with Python {b_['python']}, pandas {b_['pandas']}, numpy {b_['numpy']}, "
-               f"scikit-learn {b_['scikit_learn']}, seed {b_['seed']}. Rebuild: "
-               f"`OLIST_DATA_DIR=/path/to/Olist_CSV python deployment/model_app/build_models.py`.")
+               f"scikit-learn {b_['scikit_learn']}, seed {b_['seed']}, and served by the model API (see *Model "
+               f"service*). Rebuild: `OLIST_DATA_DIR=/path/to/Olist_CSV python deployment/model_app/build_models.py`, "
+               f"then `python deployment/api/batch_score.py`.")
+
+
+# ------------------------------------------------------------------ About: the model service
+def service_page():
+    st.title("🛰️ Model service")
+    st.markdown(
+        "The models do not run inside this app. They run in a separate **model API** (FastAPI, hosted on Render), "
+        "which loads them once when it starts; this app is its frontend and sends every form and upload to it as "
+        "JSON. Other clients use the same API: the batch job that scores the test period for the audit, tariff, queue "
+        "and monitoring pages, and anyone with a script or a notebook.")
+    st.markdown(
+        "| Part | Where | What it does |\n|---|---|---|\n"
+        "| Model API | Render, `deployment/api` | loads the three pipelines once; validates every input; returns "
+        "predictions with drift warnings; logs every prediction |\n"
+        "| This app | Streamlit Community Cloud, `deployment/model_app` | forms, uploads, lists and charts; no model "
+        "files |\n"
+        "| Batch job | `deployment/api/batch_score.py` | scores every held-out record through the API for the "
+        "population pages, and checks the scores against the build |")
+    api_health.clear()
+    ok, info = api_health()
+    st.subheader("Status")
+    c = st.columns(4)
+    c[0].metric("Model API", "online" if ok else "asleep")
+    if ok:
+        up = info["uptime_s"]
+        c[1].metric("Response time", f"{info['ms']:.0f} ms")
+        c[2].metric("Version", info["version"], f"models built {info['models_built']}", delta_color="off")
+        c[3].metric("Up for", f"{up // 3600} h {up % 3600 // 60} min" if up >= 3600 else f"{up // 60} min {up % 60} s")
+    st.markdown(f"Address: `{API_URL}` · [interactive docs]({API_URL}/docs) · [model info]({API_URL}/model-info) · "
+                f"[log summary]({API_URL}/logs/summary)")
+    st.markdown(
+        "| Method | Path | Used by |\n|---|---|---|\n"
+        "| GET | `/` | the status in the sidebar |\n"
+        "| GET | `/model-info` | this page |\n"
+        "| POST | `/freight/predict` | Check a charge, *A new listing* |\n"
+        "| POST | `/freight/batch` | Freight audit uploads; the batch job |\n"
+        "| POST | `/late/predict` | Promise check |\n"
+        "| POST | `/late/batch` | the promise what-if curves; the batch job |\n"
+        "| GET | `/logs/summary` | this page |")
+    if not ok:
+        st.info("The API sleeps after 15 minutes without traffic (Render's free tier). Wake it to see its statistics.")
+        if not st.button("Wake the API", type="primary"):
+            return
+    info, logs = api_get("/model-info"), api_get("/logs/summary")
+    if info is None or logs is None:
+        return
+
+    st.subheader("Model statistics (`/model-info`)")
+    m = info["models"]
+    st.dataframe(pd.DataFrame([
+        ("Forest (fair freight)", m["freight_forest"]["estimator"], f"MAE R$ {m['freight_forest']['test']['MAE_rs']:.2f}"
+         f" ({m['freight_forest']['test']['MAE_pct']}% of mean freight), R² {m['freight_forest']['test']['R2_rs']:.3f}"),
+        ("Ridge (second opinion)", m["freight_ridge"]["estimator"], f"MAE R$ {m['freight_ridge']['test']['MAE_rs']:.2f}, "
+         f"R² {m['freight_ridge']['test']['R2_rs']:.3f}"),
+        ("Logistic (late delivery)", m["late_logit"]["estimator"], f"lift {m['late_logit']['test']['Lift']:.2f}, "
+         f"ROC-AUC {m['late_logit']['test']['ROC_AUC']:.3f}, recall at 10% {m['late_logit']['test']['Recall']:.1%}")],
+        columns=["Model", "Estimator", "Test results"]), hide_index=True, width="stretch")
+    rt = info["runtime"]
+    st.caption(f"Served with Python {rt['python']}, scikit-learn {rt['scikit_learn']}, numpy {rt['numpy']}, pandas "
+               f"{rt['pandas']}; models built {info['built']['date']}. Batches of up to "
+               f"{info['validation']['max_batch']:,} rows. Drift: {info['drift']['method']}")
+
+    st.subheader("Live monitoring (`/logs/summary`)")
+    st.caption(logs["storage"])
+    n, req = logs["predictions"], logs["requests"]
+    k = st.columns(4)
+    k[0].metric("Predictions logged", f"{n['total']:,}", f"{n['freight']:,} freight · {n['late']:,} late",
+                delta_color="off")
+    k[1].metric("Requests", f"{req['total']:,}", f"{req['rejected_422']:,} rejected inputs", delta_color="off")
+    k[2].metric("With drift warnings", f"{logs['drift']['rate']:.1%}" if logs["drift"]["rate"] is not None else "–")
+    lat = logs["latency_ms"]
+    k[3].metric("Latency, median", f"{lat['p50']:.0f} ms" if lat else "–",
+                f"95th percentile {lat['p95']:.0f} ms" if lat else None, delta_color="off")
+    fr, la = logs["freight"], logs["late"]
+    k = st.columns(4)
+    for i, r in enumerate(RULES):
+        v = fr["unusual_rate"][r]
+        k[i].metric(f"Unusual charges, {'overall' if r == 'overall' else 'per price band'}",
+                    f"{v:.1%}" if v is not None else "–", f"of {fr['with_charge']:,} with a charge", delta_color="off",
+                    help=RULES[r])
+    k[2].metric("Orders on the review list", f"{la['on_review_list_rate']:.1%}" if la["on_review_list_rate"] is not None
+                else "–")
+    k[3].metric("Average risk score", f"{la['mean_risk']:.3f}" if la["mean_risk"] is not None else "–")
+    a, b = st.columns(2, gap="large")
+    with a:
+        by = pd.Series(logs["drift"]["by_input"], dtype=float)
+        if len(by):
+            fig = go.Figure(go.Bar(x=by.values, y=by.index, orientation="h", marker_color=ORANGE,
+                                   hovertemplate="%{y}: %{x:,} predictions<extra></extra>"))
+            fig.update_yaxes(autorange="reversed")
+            fig.update_xaxes(title="predictions with a drift warning on this input")
+            st.plotly_chart(layout(fig, h=90 + 28 * len(by), title="Drift warnings by input", bargap=0.3),
+                            width="stretch")
+        else:
+            st.markdown("No drift warnings logged yet.")
+    with b:
+        fu = pd.Series(la["follow_ups"], dtype=float)
+        if len(fu):
+            fig = go.Figure(go.Bar(x=fu.values, y=fu.index, orientation="h", marker_color=BLUE,
+                                   hovertemplate="%{y}: %{x:,} orders<extra></extra>"))
+            fig.update_yaxes(autorange="reversed")
+            fig.update_xaxes(title="orders scored")
+            st.plotly_chart(layout(fig, h=90 + 28 * len(fu), title="Suggested follow-ups", bargap=0.3),
+                            width="stretch")
+    if logs["since"]:
+        st.caption(f"Logged since {logs['since'][:19].replace('T', ' ')} UTC; last prediction "
+                   f"{logs['last'][:19].replace('T', ' ')} UTC. By endpoint: "
+                   + ", ".join(f"`{e}` {v:,}" for e, v in req["by_endpoint"].items()) + ".")
+
+
+def api_status():
+    """API status indicator for the sidebar (checked at most once a minute)."""
+    ok, info = api_health()
+    if ok:
+        st.sidebar.success(f"Model API online · {info['ms']:.0f} ms", icon="🟢")
+    else:
+        st.sidebar.warning("Model API asleep or unreachable: the forms wake it (30–60 s).", icon="🟠")
 
 
 # ------------------------------------------------------------------ navigation, grouped by stakeholder
@@ -1127,10 +1359,12 @@ PAGE_QUEUE = st.Page(queue_page, title="Daily risk queue", icon="⏰", url_path=
 PAGE_PROMISE = st.Page(promise_page, title="Promise check", icon="📅", url_path="promise")
 PAGE_MONITOR = st.Page(monitor_page, title="Monitoring", icon="📈", url_path="monitor")
 PAGE_CARD = st.Page(model_card, title="Model card", icon="📋", url_path="model-card")
+PAGE_SERVICE = st.Page(service_page, title="Model service", icon="🛰️", url_path="service")
 nav = st.navigation({"": [PAGE_HOME],
                      "Pricing and finance analyst": [PAGE_AUDIT, PAGE_CHECK, PAGE_TARIFF],
                      "Operations and customer experience": [PAGE_QUEUE, PAGE_PROMISE, PAGE_MONITOR],
-                     "About": [PAGE_CARD]})
+                     "About": [PAGE_CARD, PAGE_SERVICE]})
+api_status()
 st.sidebar.caption("Team 5 · IT5006 · AY2026/27 · Phase 3")
 st.sidebar.caption("Scores held-out Olist records (2016–2018) as if they were new orders.")
 nav.run()

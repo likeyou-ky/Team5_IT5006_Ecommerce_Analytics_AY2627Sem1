@@ -33,6 +33,7 @@ def test_health():
     r = client.get("/")
     assert r.status_code == 200
     assert r.json()["status"] == "healthy" and r.json()["models_loaded"] is True
+    assert client.head("/").status_code == 200
 
 
 def test_model_info_reports_the_tested_models():

@@ -1308,7 +1308,7 @@ def service_page():
     k = st.columns(4)
     for i, r in enumerate(RULES):
         v = fr["unusual_rate"][r]
-        k[i].metric(f"Unusual charges, {'overall' if r == 'overall' else 'per price band'}",
+        k[i].metric(f"Unusual, {'overall' if r == 'overall' else 'per-band'} rule",
                     f"{v:.1%}" if v is not None else "–", f"of {fr['with_charge']:,} with a charge", delta_color="off",
                     help=RULES[r])
     k[2].metric("Orders on the review list", f"{la['on_review_list_rate']:.1%}" if la["on_review_list_rate"] is not None

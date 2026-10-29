@@ -579,9 +579,9 @@ async def validation_error(request: Request, exc: RequestValidationError):
                                                   "hint": "See /docs for the expected fields and their ranges."})
 
 
-@app.get("/", tags=["service"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["service"])
 def health():
-    """Health check: is the service up and are the models loaded?"""
+    """Health check: is the service up and are the models loaded? (HEAD too, for uptime monitors and Render's probe)"""
     return {"status": "healthy", "service": app.title, "version": VERSION, "models_loaded": True,
             "models_built": META["built"]["date"], "uptime_s": round(time.time() - STARTED),
             "endpoints": ["/model-info", "/freight/predict", "/freight/batch", "/late/predict", "/late/batch",

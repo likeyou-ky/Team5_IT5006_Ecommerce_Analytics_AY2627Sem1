@@ -14,6 +14,11 @@ Deploys the two final models, one tool set per stakeholder: Problem 1 from noteb
     Daily risk queue  which of today's orders to follow up, and how
     Promise check     how risky a new order is, and what promise would keep it off the review list
     Monitoring        when a change in the promise rules means the model needs a review
+  Both teams
+    Map by state      where unusual charges and late orders concentrate; opens the audit or the queue for a state
+
+The lists are clickable (a row opens its detail), the forms update as the inputs change, and an analyst's review
+marks (a verdict on a flagged item, "contacted" on an order) are kept for the browser session and can be downloaded.
 
 The app is the frontend of a two-part deployment. The models run in a separate service, the model API
 (deployment/api/main.py, FastAPI on Render), and this app holds no model files: the forms and CSV uploads send their
@@ -29,7 +34,7 @@ Run locally:   uvicorn main:app --app-dir deployment/api --port 8000
                API_URL=http://localhost:8000 streamlit run deployment/model_app/app.py
 The API address comes from st.secrets["API_URL"], else the API_URL environment variable, else the Render service.
 """
-import json, os, re, time
+import json, os, re, threading, time
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +55,7 @@ MAX_UPLOAD_ROWS = 20_000
 CHUNK = 2_000                       # rows per API call (the API takes at most 5,000)
 API_TIMEOUT = (10, 120)             # connect, read (s)
 WAKE_LIMIT = 90                     # s to wait for a sleeping free-tier service
+API_CACHE = 200                     # API answers remembered per session, by request
 
 # Chart colours: the CVD-validated slots and diverging pair of src/olist_theme.py
 BLUE, ORANGE, GREY, INK, INK_2, GRID = "#2a78d6", "#eb6834", "#c3c2b7", "#10100f", "#52514e", "#e1e0d9"
@@ -66,6 +72,9 @@ DRIVER_GROUP = {"promised_days": "promise", "distance_km": "route", "same_state"
 ACTIONS = {"promise": "Update the delivery estimate", "route": "Check carrier tracking",
            "order": "Confirm dispatch with seller", None: "Send a tracking update"}
 RULES = {"overall": "Top 5% overall (evaluated)", "band": "Top 5% within each price band (recommended)"}
+MARKS = ["overcharge", "justified", "data error"]   # an analyst's verdict on a flagged item (kept for the session)
+# Widget keys kept when the user moves between pages (filters, form inputs), and set by the map and the scenarios
+KEEP = ("f_", "q_", "ql_", "pc_", "map_")
 
 
 # ------------------------------------------------------------------ loading (cached, with a clear failure message)
@@ -154,6 +163,19 @@ def wake_api():
     return False
 
 
+def ping_api():
+    """Wake a sleeping API in the background when a session starts, so the first form does not wait for it. Runs in
+    its own thread and touches no Streamlit state."""
+    try:
+        requests.get(f"{API_URL}/", timeout=WAKE_LIMIT)
+    except requests.RequestException:
+        pass
+
+
+def show_rejection(body):
+    st.error("The API rejected the input:\n\n" + "\n".join(f"- {e}" for e in body.get("errors", [body])))
+
+
 def api_call(method, path, payload=None, params=None, show_422=True):
     """Call the API with a timeout and up to two retries. Returns (status, JSON); shows what went wrong."""
     if not wake_api():
@@ -173,7 +195,7 @@ def api_call(method, path, payload=None, params=None, show_422=True):
         if r.status_code == 422:
             body = r.json()
             if show_422:
-                st.error("The API rejected the input:\n\n" + "\n".join(f"- {e}" for e in body.get("errors", [body])))
+                show_rejection(body)
             return 422, body
         if not r.ok:
             st.error(f"The model API returned an error ({r.status_code}): {r.text[:300]}")
@@ -184,10 +206,23 @@ def api_call(method, path, payload=None, params=None, show_422=True):
 
 
 def api_post(path, payload, params=None):
-    if not wake_api():
-        return None
-    with st.spinner("Asking the model API…"):
-        status, body = api_call("POST", path, payload, params)
+    """POST one request, remembering the answer (or the rejection) for the session: a rerun that leaves the inputs
+    unchanged (another widget, a row selection) shows the stored answer instead of calling the API again."""
+    key = json.dumps([path, payload, params], sort_keys=True, default=str)
+    cache = st.session_state.setdefault("api_cache", {})
+    if key not in cache:
+        if not wake_api():
+            return None
+        with st.spinner("Asking the model API…"):
+            status, body = api_call("POST", path, payload, params, show_422=False)
+        if status not in (200, 422):
+            return None
+        cache[key] = (status, body)
+        while len(cache) > API_CACHE:
+            cache.pop(next(iter(cache)))
+    status, body = cache[key]
+    if status == 422:
+        show_rejection(body)
     return body if status == 200 else None
 
 
@@ -277,15 +312,31 @@ def layout(fig, h=360, title=None, **kw):
 
 
 def how_to(text):
-    with st.expander("How to use this page", expanded=False):
+    with st.popover("How to use this page", icon="💡"):
         st.markdown(text)
+
+
+def keep(key, value):
+    """Key of a widget whose value outlives its page (see KEEP); the widget is then created without a value.
+    Streamlit forgets a widget's value when its page is left, and a value changed inside a fragment is lost even
+    when the key is stored again, so remember() copies the values to plain session keys and they are restored here."""
+    if key not in st.session_state:
+        st.session_state[key] = st.session_state.get(f"_kept_{key}", value)
+    return key
+
+
+def remember():
+    """Copy the kept widgets' values to plain session keys. Runs at the top of every full run and at the end of the
+    inputs of each fragment (a fragment rerun does not run the top of the script)."""
+    for k in [k for k in st.session_state if str(k).startswith(KEEP)]:
+        st.session_state[f"_kept_{k}"] = st.session_state[k]
 
 
 def place_inputs(prefix, label, default="SP"):
     """State and optional zip code of one party. The API places the party (and says how) from these."""
     c = st.columns(2)
-    state = c[0].selectbox(f"{label} state", STATES, index=STATES.index(default), key=f"{prefix}_state")
-    z = c[1].text_input(f"{label} zip code (optional)", key=f"{prefix}_zip", placeholder="e.g. 01310")
+    state = c[0].selectbox(f"{label} state", STATES, key=keep(f"{prefix}_state", default))
+    z = c[1].text_input(f"{label} zip code (optional)", key=keep(f"{prefix}_zip", ""), placeholder="e.g. 01310")
     return z.strip(), state
 
 
@@ -334,16 +385,221 @@ def heldout_items_scored(rule):
 
 
 def rule_picker():
-    """The unusual-freight rule, shared by the analyst's pages."""
-    keys = list(RULES)
-    choice = st.radio("Unusual-freight rule", keys, index=keys.index(st.session_state.get("rule", "overall")),
-                      format_func=RULES.get, horizontal=True,
-                      help="Top 5% overall (evaluated): the 5% of items with the largest charge above fair freight; "
-                           "the rule the notebooks evaluate, and the one the headline audit numbers use. Top 5% within "
-                           "each price band (recommended): 5% of every price band, as the report recommends, so "
-                           "expensive items, whose freight is harder to predict, do not crowd the review list.")
-    st.session_state.rule = choice
-    return choice
+    """The unusual-freight rule, shared by the analyst's pages (a kept widget, so every page uses the same rule)."""
+    return st.radio("Unusual-freight rule", list(RULES), format_func=RULES.get, horizontal=True,
+                    key=keep("f_rule", "overall"),
+                    help="Top 5% overall (evaluated): the 5% of items with the largest charge above fair freight; "
+                         "the rule the notebooks evaluate, and the one the headline audit numbers use. Top 5% within "
+                         "each price band (recommended): 5% of every price band, as the report recommends, so "
+                         "expensive items, whose freight is harder to predict, do not crowd the review list.")
+
+
+def similar_items(cat, s_state, c_state, ckg, km, exclude=None, n=5):
+    """Up to n held-out items like this one: the same category going to the same customer state (the same route
+    first), with a chargeable weight within ±50% and a distance within ±25% (at least ±150 km)."""
+    c = ITEMS[(ITEMS.category == cat) & (ITEMS.customer_state == c_state)]
+    if exclude is not None:
+        c = c.drop(index=exclude, errors="ignore")
+    kg_gap = np.abs(np.log((c.chargeable_kg + 0.1) / (ckg + 0.1))) / np.log(1.5)
+    km_gap = (np.abs(c.distance_km - km) / max(0.25 * km, 150) if km is not None and np.isfinite(km)
+              else pd.Series(0.0, index=c.index))
+    ok = (kg_gap <= 1) & (km_gap <= 1)                                   # an unknown distance is never close
+    other_route = (c.seller_state != s_state).astype(float)
+    return c[ok].assign(_gap=(other_route * 10 + kg_gap + km_gap)[ok]).nsmallest(n, "_gap")
+
+
+def why_price(cat, s_state, c_state, ckg, km, same, fair, fair_ridge, charged=None, exclude=None):
+    """Why this price: the simple tariff built up from its parts next to the forest and Ridge estimates (and the
+    charge), and the most similar held-out items with what they were charged and their fair freight."""
+    st.markdown("#### Why this price?")
+    t = P1["tariff"]
+    a, b = st.columns([5, 4], gap="large")
+    with a:
+        if km is None or not np.isfinite(km):
+            st.info("The distance is unknown, so the simple tariff cannot be priced; the models use the training "
+                    "median distance instead.")
+        else:
+            parts = [("base", t["base"], "base charge"),
+                     (f"{ckg:,.2f} kg", t["per_kg"] * ckg, f"{ckg:,.2f} chargeable kg × R$ {t['per_kg']:.3f}"),
+                     (f"{km:,.0f} km", t["per_100km"] * km / 100, f"{km:,.0f} km × R$ {t['per_100km']:.3f} per 100 km")]
+            if same:
+                parts.append(("same state", t["same_state"], "discount within a state"))
+            total = max(0.0, sum(v for _, v, _ in parts))
+            fig = go.Figure(go.Waterfall(
+                x=[p[0] for p in parts] + ["tariff"], y=[p[1] for p in parts] + [0],
+                measure=["relative"] * len(parts) + ["total"], customdata=[p[2] for p in parts] + ["simple tariff"],
+                text=[f"{v:+.2f}" for _, v, _ in parts] + [f"{total:.2f}"], textposition="outside",
+                increasing=dict(marker=dict(color=GREY)), decreasing=dict(marker=dict(color=DIV_MID, line=dict(
+                    color=GREY, width=1))), totals=dict(marker=dict(color=INK_2)),
+                connector=dict(line=dict(color=GRID, width=1)), cliponaxis=False, showlegend=False,
+                hovertemplate="%{customdata}: R$ %{y:+.2f}<extra></extra>"))
+            ests = [("forest", fair, BLUE, "fair freight (forest)"), ("Ridge", fair_ridge, DIV_LOW, "Ridge estimate")]
+            if charged:
+                ests.append(("charged", charged, ORANGE, "charged"))
+            for x, v, colour, name in ests:
+                fig.add_bar(x=[x], y=[v], marker_color=colour, text=[f"{v:.2f}"], textposition="outside",
+                            cliponaxis=False, showlegend=False, hovertemplate=f"{name}: R$ %{{y:.2f}}<extra></extra>")
+            top = max([total, *[v for _, v, _, _ in ests]])
+            fig.update_yaxes(title="R$", range=[0, top * 1.2])
+            st.plotly_chart(layout(fig, h=330, title="The simple tariff, step by step, against the models",
+                                   barmode="overlay", waterfallmode="overlay", bargap=0.35), width="stretch")
+            st.caption(f"The tariff adds a base, a rate per chargeable kg and a rate per 100 km"
+                       f"{', less a discount within a state' if same else ''}: {md_money(total)}. The forest's fair "
+                       f"freight ({md_money(fair)}) also weighs the category, the price, both states and how weight "
+                       f"and distance interact, so it errs less: {md_money(P1['test']['MAE_rs'])} on average against "
+                       f"{md_money(t['mae'])} for the tariff (Ridge {md_money(P1['ridge_test']['MAE_rs'])}).")
+    with b:
+        sim = similar_items(cat, s_state, c_state, ckg, km, exclude)
+        st.markdown(f"**Similar held-out items** ({cat}, to {c_state})")
+        if sim.empty:
+            st.caption("No held-out item of this category went to this state with a similar weight over a similar "
+                       "distance.")
+            return
+        st.dataframe(sim.assign(order=sim.order_id.str[:8], route=sim.seller_state + " → " + sim.customer_state)[
+            ["order", "route", "chargeable_kg", "distance_km", "freight_value", "expected"]], hide_index=True,
+            width="stretch", column_config={
+                "chargeable_kg": st.column_config.NumberColumn("kg", format="%.2f"),
+                "distance_km": st.column_config.NumberColumn("km", format="%.0f"),
+                "freight_value": st.column_config.NumberColumn("charged", format="R$ %.2f"),
+                "expected": st.column_config.NumberColumn("fair", format="R$ %.2f")})
+        st.caption(f"Same category and customer state (same route first), chargeable weight within ±50% and distance "
+                   f"within ±25%. They were charged {md_money(sim.freight_value.median())} (median) against a fair "
+                   f"freight of {md_money(sim.expected.median())}; fair freight comes from the API's batch run.")
+
+
+def freight_curves(p, charged=None):
+    """Fair freight of a listing as its weight or its distance changes: one /freight/batch call with variants of the
+    listing at the route the API placed (explicit distance_km), shaded by the quote range (± the price band's error).
+    The grids stay inside the training data's drift limits, so the variants raise no drift warnings."""
+    x = p["inputs"]
+    w0, km0 = float(x["weight_kg"]), x["distance_km"]
+    if km0 is None:
+        return
+    base = {k: x[k] for k in ("category", "price", "volume_cm3", "n_items", "n_sellers", "seller_state",
+                              "customer_state")} | dict(weight_kg=w0, distance_km=float(km0))
+    weights = np.unique(np.round(np.r_[np.geomspace(0.05, max(18.0, w0), 30), w0], 3))
+    kms = np.unique(np.round(np.r_[np.linspace(10, max(3500.0, km0), 30), km0], 1))
+    rows = [dict(base, weight_kg=float(w)) for w in weights] + [dict(base, distance_km=float(k)) for k in kms]
+    res = api_post("/freight/batch", {"items": rows})
+    if res is None:
+        return
+    fair = np.array([q["fair_freight"] for q in res["predictions"]])
+    mae, vol_kg = p["band_mae"], x["volume_cm3"] / 5000
+    st.markdown("#### What if the weight or the distance changed?")
+    cols = st.columns(2, gap="large")
+    for col, xs, ys, now, what, unit, log in [
+            (cols[0], weights, fair[:len(weights)], w0, "weight", "kg", True),
+            (cols[1], kms, fair[len(weights):], float(km0), "distance", "km", False)]:
+        fig = go.Figure()
+        fig.add_scatter(x=xs, y=np.maximum(ys - mae, 0), mode="lines", line=dict(width=0), hoverinfo="skip",
+                        showlegend=False)
+        fig.add_scatter(x=xs, y=ys + mae, mode="lines", line=dict(width=0), fill="tonexty",
+                        fillcolor="rgba(42,120,214,0.15)", name=f"quote range (± R$ {mae:.2f})", hoverinfo="skip")
+        fig.add_scatter(x=xs, y=ys, mode="lines", line=dict(color=BLUE, width=2), name="fair freight",
+                        hovertemplate=f"%{{x:,.2f}} {unit} → fair freight R$ %{{y:.2f}}<extra></extra>")
+        fig.add_scatter(x=[now], y=[p["fair_freight"]], mode="markers", name="this listing",
+                        marker=dict(color=ORANGE, size=11, line=dict(color="white", width=2)),
+                        hovertemplate=f"this listing: %{{x:,.2f}} {unit}, R$ %{{y:.2f}}<extra></extra>")
+        if charged:
+            fig.add_hline(y=charged, line=dict(color=ORANGE, width=1.5, dash="dash"),
+                          annotation_text=f"charged R$ {charged:.2f}", annotation_position="top left")
+        if log and xs[0] < vol_kg < xs[-1]:
+            # a shape and its label by hand: add_vline places its label in linear units on a log axis
+            fig.add_shape(type="line", x0=vol_kg, x1=vol_kg, y0=0, y1=1, yref="paper",
+                          line=dict(color=INK_2, width=1, dash="dot"))
+            fig.add_annotation(x=np.log10(vol_kg), y=1, yref="paper", text="volumetric weight", showarrow=False,
+                               xanchor="left", yanchor="top", font=dict(size=11, color=INK_2))
+        fig.update_xaxes(title=f"{what} ({unit}){', log scale' if log else ''}", type="log" if log else "linear",
+                         range=[np.log10(xs[0]), np.log10(xs[-1])] if log else [0, xs[-1]],
+                         tickvals=[0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200] if log else None)
+        fig.update_yaxes(title="fair freight (R$)", rangemode="tozero")
+        with col:
+            st.plotly_chart(layout(fig, h=340, title=f"Fair freight by {what}"), width="stretch")
+    st.caption(f"Each curve changes one input and keeps the rest (one `/freight/batch` call with "
+               f"{len(rows)} variants of the listing). Left of the volumetric weight (volume / 5,000 = "
+               f"{vol_kg:,.2f} kg) carriers charge by volume, so a lighter item costs about the same. The shaded band "
+               f"is the quote range: ± {md_money(mae)}, the forest's average error at this price.")
+
+
+# ------------------------------------------------------------------ review marks (kept for the browser session only)
+def item_keys(d):
+    """A key per item for the review marks: order and item number (held-out items) or order and file row (uploads)."""
+    second = d.order_item_id if "order_item_id" in d else d.file_row
+    return d.order_id.astype(str) + "/" + second.astype(str)
+
+
+def _save_mark(store, key, wkey, info):
+    """Widget callback: store (or clear) one mark before the page reruns, so every list shows it at once."""
+    v = st.session_state.get(wkey)
+    marks = st.session_state.setdefault(store, {})
+    if v:
+        marks[key] = dict(info, mark="contacted" if v is True else v, marked_at=time.strftime("%H:%M:%S"))
+    else:
+        marks.pop(key, None)
+
+
+def mark_item(it, key):
+    """The analyst's verdict on one flagged item."""
+    marks = st.session_state.setdefault("item_marks", {})
+    wkey = f"mk_{key}"
+    if wkey not in st.session_state:
+        st.session_state[wkey] = marks.get(key, {}).get("mark")
+    info = dict(order_id=it.order_id, item=key.split("/", 1)[1], seller_id=it.seller_id, category=it.category,
+                price=round(float(it.price), 2), charged=round(float(it.freight_value), 2),
+                fair_freight=round(float(it.expected), 2), excess=round(float(it.excess), 2),
+                flagged_by="both models" if it.both else "forest only" if it.unusual else "not flagged")
+    st.segmented_control("Your verdict on this charge", MARKS, key=wkey, on_change=_save_mark,
+                         args=("item_marks", key, wkey, info),
+                         help="Recorded for this browser session only; download the marks from the review list.")
+
+
+def mark_order(row):
+    """'Contacted' on one order of the risk queue."""
+    oid = row.order_id
+    marks = st.session_state.setdefault("order_marks", {})
+    wkey = f"ct_{oid}"
+    if wkey not in st.session_state:
+        st.session_state[wkey] = oid in marks
+    info = dict(order_id=oid, seller_id=row.seller_id, placed=f"{row.order_purchase_timestamp:%Y-%m-%d %H:%M}",
+                route=f"{row.seller_state} → {row.customer_state}", promised_days=round(float(row.promised_days), 1),
+                risk=round(float(row.risk), 4), follow_up=row.action)
+    st.toggle("Contacted: the follow-up is done", key=wkey, on_change=_save_mark,
+              args=("order_marks", oid, wkey, info))
+
+
+def marks_summary(store, what, file):
+    """The running 'reviewed so far' line, with the marks as CSV. `what` is (singular, plural)."""
+    marks = st.session_state.get(store, {})
+    with st.container(border=True):
+        a, b = st.columns([3, 1], vertical_alignment="center")
+        if marks:
+            n = pd.Series([m["mark"] for m in marks.values()]).value_counts()
+            a.markdown(f"**Reviewed so far:** {len(marks)} {what[len(marks) != 1]}" + (
+                " (" + ", ".join(f"{v} {k}" for k, v in n.items()) + ")" if store == "item_marks" else "") + ".")
+        else:
+            a.markdown(f"**Reviewed so far:** no {what[1]} yet. Open one from the list to record it.")
+        a.caption("Kept for this browser session only (no database): download the marks before you close the tab.")
+        b.download_button("Download the marks (CSV)", pd.DataFrame(list(marks.values())).to_csv(index=False), file,
+                          "text/csv", disabled=not marks, width="stretch")
+
+
+def item_inputs(it):
+    rows = [("Price", money(it.price)), ("Weight", f"{it.weight_kg:,.2f} kg"), ("Volume", f"{it.volume_cm3:,.0f} cm³"),
+            ("Chargeable weight", f"{it.chargeable_kg:,.2f} kg"), ("Route", f"{it.seller_state} → {it.customer_state}"),
+            ("Distance", f"{it.distance_km:,.0f} km" if pd.notna(it.distance_km) else
+             "unknown (zip code not in the Olist table): the model uses the training median"), ("Category", it.category),
+            ("Items / sellers in the order", f"{it.n_items} / {it.n_sellers}")]
+    if USES_LISTING and "photos_qty" in it:
+        rows.append(("Photos, name and description length",
+                     f"{it.photos_qty:.0f}, {it.name_len:.0f}, {it.desc_len:.0f} characters"))
+    return pd.DataFrame(rows, columns=["Input", "Value"])
+
+
+def explain_item(it, exclude=None):
+    """The 'why this price' panel for a scored item (held-out or uploaded)."""
+    why_price(it.category, it.seller_state, it.customer_state, float(it.chargeable_kg),
+              float(it.distance_km) if pd.notna(it.distance_km) else None, bool(it.same_state), float(it.expected),
+              float(it.expected_ridge), float(it.freight_value), exclude)
 
 
 # ------------------------------------------------------------------ Problem 2 scores
@@ -440,6 +696,22 @@ def promise_section(base, now_y, line, measure, line_label, title):
 
 
 # ------------------------------------------------------------------ Home
+def start_scenario(name):
+    """One-click examples: set the target page's inputs in the session, then open it."""
+    ss = st.session_state
+    if name == "charge":                                         # the first item on the audit's review list
+        d = heldout_items_scored("overall")
+        ss.update(f_rule="overall", check_tab=CHECK_TABS[0],
+                  item_id=d[d.unusual].sort_values(["both", "excess"], ascending=False).index[0])
+        st.switch_page(PAGE_CHECK)
+    elif name == "order":
+        ss.update(pc_promise=12, pc_s_state="SP", pc_s_zip="01310", pc_c_state="AM", pc_c_zip="69005")
+        st.switch_page(PAGE_PROMISE)
+    else:
+        ss.update(q_day=pd.Timestamp("2018-07-18").date(), q_reveal=True, q_cstate=[], q_action=[])
+        st.switch_page(PAGE_QUEUE)
+
+
 def home():
     st.title("Olist logistics assistant")
     st.markdown(
@@ -478,17 +750,37 @@ def home():
         st.page_link(PAGE_QUEUE, label="Start with today's risk queue", icon="⏰")
 
     st.divider()
+    st.subheader("Try it in one click")
+    c = st.columns(3, gap="medium")
+    cards = [("charge", "🚩 A suspicious charge", "The held-out item both models flag most strongly: the verdict, why "
+              "the fair freight is what it is, and similar items.", "Check the charge"),
+             ("order", "📦 A 12-day order to Manaus", "São Paulo (zip 01310) to Manaus (zip 69005), promised in 12 "
+              "days: how risky is it, and which promise would keep it off the review list?", "Score the order"),
+             ("queue", "📋 The queue of 18 July 2018", "A day's follow-up list with the outcomes revealed: which late "
+              "orders the list caught, and why each order is on it.", "Open the queue")]
+    for col, (key, title, text, label) in zip(c, cards):
+        with col.container(border=True, height="stretch", vertical_alignment="distribute"):
+            st.markdown(f"**{title}**")
+            st.caption(text)
+            if st.button(label, key=f"scenario_{key}", type="primary", width="stretch"):
+                start_scenario(key)
+    st.page_link(PAGE_MAP, label="Or start from the map: unusual charges and late orders by state", icon="🗺️")
+
+    st.divider()
     st.subheader("How to use the app")
     st.markdown(
-        "1. Pick your team's pages in the sidebar. Each page has a **How to use this page** note at the top.\n"
-        "2. The data are historical: a *day* in the queue is a day between 26 May and 29 Aug 2018, and *Reveal what "
+        "1. Pick your team's pages in the sidebar. Each page has a **💡 How to use this page** button at the top.\n"
+        "2. Lists are clickable: select a row to open its detail (a seller's items, an item's verdict and why its fair "
+        "freight is what it is, why an order is on the queue). Filters above the lists narrow them down.\n"
+        "3. The data are historical: a *day* in the queue is a day between 26 May and 29 Aug 2018, and *Reveal what "
         "happened* shows the outcome nobody knew at checkout.\n"
-        "3. Forms take a listing or an order you describe; zip codes place seller and customer exactly, otherwise the "
+        "4. The forms update as you change an input; zip codes place seller and customer exactly, otherwise the "
         "centre of the state is used. The API checks every input and warns when one is unlike the training data.\n"
-        "4. Lists can be downloaded as CSV for follow-up. The **Model card** gives the data, validation, test results "
-        "and limits of every model.\n"
-        "5. The API sleeps after 15 minutes without traffic: the first form you submit may take 30–60 seconds while it "
-        "wakes up. The status in the sidebar shows whether it is awake.")
+        "5. Record your verdict on an item or mark an order as contacted: the marks show in the lists and can be "
+        "downloaded as CSV, but they are kept for this browser session only. The **Model card** gives the data, "
+        "validation, test results and limits of every model.\n"
+        "6. The API sleeps after 15 minutes without traffic: the app wakes it as soon as you open it, but the first "
+        "result may still take 30–60 seconds. The status in the sidebar shows whether it is awake.")
     st.caption(f"Team 5 · IT5006 · AY2026/27. Code: [GitHub]({REPO_URL}). "
                f"Exploratory analysis (Phase 1): [EDA dashboard]({EDA_URL}).")
 
@@ -575,6 +867,91 @@ def score_upload(u, rows):
     return d, msgs
 
 
+AUDIT_FILTERS = {"f_cat": "category", "f_sstate": "seller_state", "f_cstate": "customer_state", "f_band": "band"}
+
+
+def clear_filters(defaults):
+    for k, v in defaults.items():
+        st.session_state[k] = v
+
+
+def audit_filters(d):
+    """The audit's filters. With none set every item is kept, so the headline numbers are the notebooks'.
+    Returns (filtered items, both-models-only, description of the filters set)."""
+    ss = st.session_state
+    options = {"f_cat": sorted(set(P1["categories"]) | set(d.category.astype(str))), "f_sstate": STATES,
+               "f_cstate": STATES, "f_band": FLAG["band_labels"]}
+    for k, opts in options.items():                       # drop values another source had (e.g. an upload's category)
+        ss[k] = [v for v in ss[keep(k, [])] if v in opts]
+    with st.container(border=True):
+        c = st.columns([2.2, 1.2, 1.2, 1.2, 1.9, 0.8], vertical_alignment="bottom")
+        c[0].multiselect("Category", options["f_cat"], key="f_cat", placeholder="all categories")
+        c[1].multiselect("Seller state", STATES, key="f_sstate", placeholder="all")
+        c[2].multiselect("Customer state", STATES, key="f_cstate", placeholder="all")
+        c[3].multiselect("Price (R$)", FLAG["band_labels"], key="f_band", placeholder="all")
+        c[4].toggle("Both models only", key=keep("f_both", False),
+                    help="List only the items both models flag (the review list and a seller's items)")
+        c[5].button("Clear", on_click=clear_filters, args=({**{k: [] for k in AUDIT_FILTERS}, "f_both": False},),
+                    width="stretch")
+    m = np.ones(len(d), dtype=bool)
+    set_ = []
+    for k, col in AUDIT_FILTERS.items():
+        if ss[k]:
+            m &= d[col].astype(str).isin(ss[k]).to_numpy()
+            set_.append(f"{col.replace('_', ' ')} {', '.join(ss[k])}")
+    return d[m], ss.f_both, "; ".join(set_)
+
+
+def seller_detail(d, sid, overall, both_only):
+    """One seller's items, flag rate and excess (the drill-down of the seller table)."""
+    s = d[d.seller_id == sid]
+    u = s[s.unusual]
+    with st.container(border=True):
+        st.markdown(f"#### Seller `{sid[:8]}`")
+        st.caption(f"Seller ID {sid}")
+        k = st.columns(4)
+        k[0].metric("Items", f"{len(s):,}")
+        k[1].metric("Unusual", f"{len(u):,}", f"{len(u) / len(s):.0%} against {overall:.1%} of all items",
+                    delta_color="off")
+        k[2].metric("Flagged by both models", f"{int(u.both.sum()):,}")
+        k[3].metric("Excess on unusual items", money(u.excess.sum()),
+                    f"{u.excess.sum() / s.freight_value.sum():.1%} of their freight" if len(u) else None,
+                    delta_color="off")
+        marks = st.session_state.get("item_marks", {})
+        rows = (s[s.both] if both_only else s).sort_values(["unusual", "both", "excess"], ascending=False)
+        rows = rows.assign(flag=np.where(rows.both, "both", np.where(rows.unusual, "forest only", "")),
+                           review=item_keys(rows).map(lambda x: marks.get(x, {}).get("mark", "")),
+                           order=rows.order_id.str[:8], route=rows.seller_state + " → " + rows.customer_state)
+        st.dataframe(rows[["flag", "review", "order", "category", "price", "freight_value", "expected", "excess",
+                           "route"]], hide_index=True, width="stretch", height=min(320, 38 + 35 * len(rows)),
+                     column_config={
+                         "flag": st.column_config.TextColumn("unusual"),
+                         "price": st.column_config.NumberColumn("price", format="R$ %.2f"),
+                         "freight_value": st.column_config.NumberColumn("charged", format="R$ %.2f"),
+                         "expected": st.column_config.NumberColumn("fair freight", format="R$ %.2f"),
+                         "excess": st.column_config.NumberColumn("excess", format="R$ %.2f")})
+        st.download_button(f"Download seller {sid[:8]}'s items (CSV)",
+                           rows.drop(columns=["order", "route"]).round(2).to_csv(index=False),
+                           f"seller_{sid[:8]}_items.csv", "text/csv")
+
+
+def item_detail(it, key, heldout):
+    """One item to review (the drill-down of the review list): verdict, inputs, why this price, the analyst's mark."""
+    with st.container(border=True):
+        when = f" · purchased {it.order_purchase_timestamp:%d %b %Y}" if heldout else ""
+        st.markdown(f"#### Order `{it.order_id[:8]}`, item {key.split('/', 1)[1]}")
+        st.caption(f"{it.category} · seller `{it.seller_id[:8]}`{when}")
+        verdict(it.freight_value, it.expected, it.expected_ridge, error_band(it.price), it.unusual, it.unusual_ridge)
+        a, b = st.columns([3, 2], gap="large")
+        a.dataframe(item_inputs(it), hide_index=True, width="stretch")
+        with b:
+            mark_item(it, key)
+            if heldout and st.button("Open in Check a charge", icon="🧾", key=f"open_{key}"):
+                st.session_state.update(item_id=it.idx, check_tab=CHECK_TABS[0])
+                st.switch_page(PAGE_CHECK)
+        explain_item(it, exclude=it.idx if heldout else None)
+
+
 def audit_page():
     st.title("🔍 Freight audit")
     st.markdown(
@@ -589,11 +966,15 @@ def audit_page():
         "training data are counted.\n"
         "2. Choose the rule. *Top 5% overall* is the rule the notebooks evaluated; *top 5% within each price band*, "
         "the one the report recommends, keeps expensive items, which are harder to predict, from crowding the list.\n"
-        "3. **Sellers to audit** ranks sellers by the *share* of their items that are unusual (with a minimum number "
-        "of items), not by volume: large sellers mostly price freight consistently.\n"
-        "4. **Items to review** lists the unusual items, those flagged by both models first. Download either list.\n\n"
+        "3. Narrow the items with the filters (category, seller or customer state, price); with none set the numbers "
+        "are those of the whole test set. The **Map by state** page opens this page filtered to one state.\n"
+        "4. **Sellers to audit** ranks sellers by the *share* of their items that are unusual (with a minimum number "
+        "of items), not by volume: large sellers mostly price freight consistently. Click a seller to see their items.\n"
+        "5. **Items to review** lists the unusual items, those flagged by both models first. Click an item to see the "
+        "verdict, why its fair freight is what it is, similar items, and to record your verdict (overcharge, "
+        "justified or data error). Download either list, and your marks.\n\n"
         "A flag is a reason to look, not proof of overcharging: fragile goods, data errors or cost recovery can also "
-        "explain a high charge.")
+        "explain a high charge. Your marks are kept for this browser session only.")
     tmpl_cols = ["order_id", "seller_id", "category", "price", "freight_value", "weight_kg", "volume_cm3",
                  "distance_km", "seller_state", "customer_state"]
     tmpl_cols += [c for c in COLS_A if c not in tmpl_cols + ["chargeable_kg", "same_state", "purchase_ts"]]
@@ -626,6 +1007,14 @@ def audit_page():
         d = add_scores(scored, rule)
     else:
         d = heldout_items_scored(rule)
+    heldout = src == "all held-out items"
+    n_all = len(d)
+    d, both_only, active = audit_filters(d)
+    if active:
+        st.caption(f"Filtered to {len(d):,} of {n_all:,} items: {active}.")
+    if d.empty:
+        st.warning("No item matches these filters: clear one of them.")
+        return
     f = d[d.unusual]
     k = st.columns(4)
     k[0].metric("Items scored", f"{len(d):,}")
@@ -676,32 +1065,50 @@ def audit_page():
         st.caption(f"For comparison, the {k_big:,} sellers with the most items ship {d.seller_id.isin(big).mean():.0%} "
                    f"of items but hold {f.seller_id.isin(big).mean():.0%} of the unusual ones.")
         table = s.reset_index().assign(seller=lambda t: t.seller_id.str[:8])
-        st.dataframe(table[["seller", "items", "n_unusual", "rate", "n_both", "excess", "markup"]], hide_index=True,
-                     width="stretch", height=260, column_config={
-                         "n_unusual": st.column_config.NumberColumn("unusual"),
-                         "rate": st.column_config.NumberColumn("flag rate", format="percent"),
-                         "n_both": st.column_config.NumberColumn("both models"),
-                         "excess": st.column_config.NumberColumn("excess (R$)", format="R$ %.2f"),
-                         "markup": st.column_config.NumberColumn("median markup", format="%.2f×")})
+        # the selection resets whenever the list changes, so a selected row never points at another seller
+        view_key = f"{src}|{rule}|{active}|{min_items}|{st.session_state.get('upload_key')}"
+        st.caption("👆 Click a seller to see their items.")
+        ev = st.dataframe(table[["seller", "items", "n_unusual", "rate", "n_both", "excess", "markup"]],
+                          hide_index=True, width="stretch", height=260, on_select="rerun",
+                          selection_mode="single-row", key=f"sel_seller|{view_key}", column_config={
+                              "n_unusual": st.column_config.NumberColumn("unusual"),
+                              "rate": st.column_config.NumberColumn("flag rate", format="percent"),
+                              "n_both": st.column_config.NumberColumn("both models"),
+                              "excess": st.column_config.NumberColumn("excess (R$)", format="R$ %.2f"),
+                              "markup": st.column_config.NumberColumn("median markup", format="%.2f×")})
         st.download_button("Download the seller list (CSV)", table.drop(columns="seller").to_csv(index=False),
                            "sellers_to_audit.csv", "text/csv")
+        sel = [r for r in ev.selection.rows if r < len(table)]
+        if sel:
+            seller_detail(d, table.seller_id.iloc[sel[0]], overall, both_only)
 
     st.subheader("2 · Items to review")
-    items = (f.sort_values(["both", "excess"], ascending=False).reset_index(drop=True)
+    marks = st.session_state.get("item_marks", {})
+    items = (f[f.both] if both_only else f).sort_values(["both", "excess"], ascending=False)
+    items = (items.assign(key=item_keys(items)).rename_axis("idx").reset_index()
              .assign(priority=lambda t: np.arange(1, len(t) + 1), order=lambda t: t.order_id.str[:8],
-                     seller=lambda t: t.seller_id.str[:8], models=lambda t: np.where(t.both, "both", "forest only")))
-    st.dataframe(items[["priority", "models", "freight_value", "expected", "excess", "markup", "order", "seller", "band",
-                        "category"]], hide_index=True, width="stretch", height=320, column_config={
-                     "band": st.column_config.TextColumn("price (R$)"),
-                     "freight_value": st.column_config.NumberColumn("charged", format="R$ %.2f"),
-                     "expected": st.column_config.NumberColumn("fair freight", format="R$ %.2f"),
-                     "excess": st.column_config.NumberColumn("excess", format="R$ %.2f"),
-                     "markup": st.column_config.NumberColumn("markup", format="%.2f×")})
-    out = items[["priority", "models", "order_id", "seller_id", "category", "price", "freight_value", "expected",
-                 "expected_ridge", "excess", "markup", "weight_kg", "distance_km", "seller_state", "customer_state"]
-                + (["drift"] if "drift" in items else [])]
+                     seller=lambda t: t.seller_id.str[:8], models=lambda t: np.where(t.both, "both", "forest only"),
+                     review=lambda t: t.key.map(lambda x: marks.get(x, {}).get("mark", ""))))
+    view_key = f"{src}|{rule}|{active}|{both_only}|{st.session_state.get('upload_key')}"
+    st.caption("👆 Click an item to see the verdict, why its fair freight is what it is, and to record your review.")
+    ev = st.dataframe(items[["priority", "review", "models", "freight_value", "expected", "excess", "markup", "order",
+                             "seller", "band", "category"]], hide_index=True, width="stretch", height=320,
+                      on_select="rerun", selection_mode="single-row", key=f"sel_item|{view_key}", column_config={
+                          "band": st.column_config.TextColumn("price (R$)"),
+                          "freight_value": st.column_config.NumberColumn("charged", format="R$ %.2f"),
+                          "expected": st.column_config.NumberColumn("fair freight", format="R$ %.2f"),
+                          "excess": st.column_config.NumberColumn("excess", format="R$ %.2f"),
+                          "markup": st.column_config.NumberColumn("markup", format="%.2f×")})
+    out = items[["priority", "review", "models", "order_id", "seller_id", "category", "price", "freight_value",
+                 "expected", "expected_ridge", "excess", "markup", "weight_kg", "distance_km", "seller_state",
+                 "customer_state"] + (["drift"] if "drift" in items else [])]
     st.download_button("Download the review list (CSV)", out.round(2).to_csv(index=False), "items_to_review.csv",
                        "text/csv")
+    marks_summary("item_marks", ("item", "items"), "freight_review_marks.csv")
+    sel = [r for r in ev.selection.rows if r < len(items)]
+    if sel:
+        it = items.iloc[sel[0]]
+        item_detail(it, it.key, heldout)
 
     st.subheader("3 · Where the unusual charges sit")
     a, b = st.columns([3, 2], gap="large")
@@ -735,9 +1142,10 @@ def audit_page():
 
 
 # ------------------------------------------------------------------ Analyst: check a charge
-def verdict(charged, expected, expected_ridge, band, model_flag, ridge_flag):
-    """The charge against the fair freight, and the unusual-freight verdict (the flags are the API's)."""
-    c = st.columns(4)
+def verdict(charged, expected, expected_ridge, band, model_flag, ridge_flag, narrow=False):
+    """The charge against the fair freight, and the unusual-freight verdict (the flags are the API's). `narrow`
+    puts the four figures in two rows, for a column beside the inputs."""
+    c = st.columns(2) + st.columns(2) if narrow else st.columns(4)
     c[0].metric("Charged", money(charged))
     c[1].metric("Fair freight", money(expected))
     c[2].metric("Difference", money(charged - expected),
@@ -753,22 +1161,30 @@ def verdict(charged, expected, expected_ridge, band, model_flag, ridge_flag):
         st.success(f"✅ **Within the normal range** for an item like this. {second}")
 
 
+CHECK_TABS = ["A held-out item", "A new listing (quote)"]
+
+
 def check_page():
     st.title("🧾 Check a charge")
     st.markdown("Is one charge fair, and what should a new listing be quoted? Use it when a seller disputes a flag, "
                 "a buyer complains about freight, or a new listing needs a sanity check.")
     rule = rule_picker()
-    t1, t2 = st.tabs(["A held-out item", "A new listing (quote)"])
-    with t1:
-        check_item(rule)
-    with t2:
-        quote_listing(rule)
+    # lazy tabs: only the open tab runs, so a held-out item never waits for the API
+    t1, t2 = st.tabs(CHECK_TABS, key="check_tab", on_change="rerun")
+    if t1.open:
+        with t1:
+            check_item(rule)
+    if t2.open:
+        with t2:
+            quote_listing(rule)
 
 
 def check_item(rule):
     d = heldout_items_scored(rule)
-    how_to("Draw a random held-out item, or paste an order ID from the audit's review list. The table under the "
-           "verdict shows what the model used.")
+    how_to("Draw a random held-out item, paste an order ID from the audit's review list, or open one from the audit "
+           "(click an item, then **Open in Check a charge**). Under the verdict: what the model used, your verdict "
+           "on the charge (kept for this session), and why the fair freight is what it is: the simple tariff step by "
+           "step against the two models, and similar held-out items with their charges.")
     c = st.columns([1, 1, 2])
     only = c[0].radio("Draw from", ["all held-out items", "unusual items only"])
     pool = d[d.unusual] if only == "unusual items only" else d
@@ -787,73 +1203,75 @@ def check_item(rule):
     st.markdown(f"**Order `{it.order_id}`**, item {it.order_item_id} · {it.category} · seller `{it.seller_id[:8]}` · "
                 f"purchased {it.order_purchase_timestamp:%d %b %Y}")
     verdict(it.freight_value, it.expected, it.expected_ridge, error_band(it.price), it.unusual, it.unusual_ridge)
-    if pd.notna(it.distance_km):
-        st.caption(f"A simple published tariff would charge "
-                   f"{md_money(float(tariff(it.chargeable_kg, it.distance_km, it.same_state)))}; it errs by "
-                   f"{md_money(P1['tariff']['mae'])} on average, against {md_money(P1['test']['MAE_rs'])} for the forest.")
-    rows = [("Price", money(it.price)), ("Weight", f"{it.weight_kg:,.2f} kg"), ("Volume", f"{it.volume_cm3:,.0f} cm³"),
-            ("Chargeable weight", f"{it.chargeable_kg:,.2f} kg"), ("Route", f"{it.seller_state} → {it.customer_state}"),
-            ("Distance", f"{it.distance_km:,.0f} km" if pd.notna(it.distance_km) else
-             "unknown (zip code not in the Olist table): the model uses the training median"), ("Category", it.category),
-            ("Items / sellers in the order", f"{it.n_items} / {it.n_sellers}")]
-    if USES_LISTING:
-        rows.append(("Photos, name and description length",
-                     f"{it.photos_qty:.0f}, {it.name_len:.0f}, {it.desc_len:.0f} characters"))
-    info = pd.DataFrame(rows, columns=["Input", "Value"])
-    st.dataframe(info, hide_index=True, width="stretch")
+    a, b = st.columns([3, 2], gap="large")
+    a.dataframe(item_inputs(it), hide_index=True, width="stretch")
+    with b:
+        mark_item(it, f"{it.order_id}/{it.order_item_id}")
+        n = len(st.session_state.get("item_marks", {}))
+        st.caption(f"{n} item{'s' if n != 1 else ''} reviewed so far this session; the list and the CSV are on the "
+                   f"*Freight audit* page.")
+    explain_item(it, exclude=it.name)
 
 
+@st.fragment
 def quote_listing(rule):
-    how_to("Describe the item and the route, then press **Estimate**. The app sends the listing to the model API "
-           "(`POST /freight/predict`), which returns the fair freight and a quote range (fair freight ± the typical "
-           "error at that price). Enter the charged freight to check it as well. The API rejects impossible inputs "
-           "with a reason, and warns when an input is unlike the training data.")
-    with st.form("listing"):
-        a, b = st.columns(2, gap="large")
-        with a:
-            cat = st.selectbox("Product category", P1["categories"], index=0)
-            price = st.number_input("Item price (R$)", min_value=0.0, value=120.0, step=10.0)
-            weight_g = st.number_input("Weight (g)", min_value=0.0, value=1500.0, step=100.0)
-            d1, d2, d3 = st.columns(3)
-            length = d1.number_input("Length (cm)", min_value=0.0, value=30.0)
-            width = d2.number_input("Width (cm)", min_value=0.0, value=20.0)
-            height = d3.number_input("Height (cm)", min_value=0.0, value=15.0)
-        with b:
-            s_zip, s_state = place_inputs("s", "Seller")
-            c_zip, c_state = place_inputs("c", "Customer", "RJ")
-            e1, e2 = st.columns(2)
-            n_items = e1.number_input("Items in the order", min_value=1, value=1)
-            n_sellers = e2.number_input("Sellers in the order", min_value=1, value=1)
-        charged = st.number_input("Freight charged (R$, optional: leave 0 to skip the check)", min_value=0.0, value=0.0)
-        go_ = st.form_submit_button("Estimate", type="primary")
-    if not go_:
-        return
-    payload = dict(category=cat, price=price, weight_kg=weight_g / 1000, volume_cm3=length * width * height,
+    """A new listing: the inputs on the left, the API's answer on the right, updated as the inputs change. A fragment,
+    so a change here reruns only this tab; the answers are remembered per input (api_post)."""
+    how_to("Describe the item and the route on the left: the result on the right updates as you change an input (the "
+           "app sends the listing to the model API, `POST /freight/predict`, and remembers each answer). It shows the "
+           "fair freight and a quote range (fair freight ± the typical error at that price); enter the charged "
+           "freight to check it as well. Below: how the fair freight changes with the weight and the distance, and "
+           "why the price is what it is. The API rejects impossible inputs with a reason, and warns when an input is "
+           "unlike the training data.")
+    a, b = st.columns([2, 3], gap="large")
+    with a:
+        cat = st.selectbox("Product category", P1["categories"], key=keep("ql_cat", P1["categories"][0]))
+        price = st.number_input("Item price (R$)", min_value=0.0, step=10.0, key=keep("ql_price", 120.0))
+        weight_g = st.number_input("Weight (g)", min_value=0.0, step=100.0, key=keep("ql_weight", 1500.0))
+        d1, d2, d3 = st.columns(3)
+        length = d1.number_input("Length (cm)", min_value=0.0, key=keep("ql_len", 30.0))
+        width = d2.number_input("Width (cm)", min_value=0.0, key=keep("ql_wid", 20.0))
+        height = d3.number_input("Height (cm)", min_value=0.0, key=keep("ql_hei", 15.0))
+        s_zip, s_state = place_inputs("ql_s", "Seller")
+        c_zip, c_state = place_inputs("ql_c", "Customer", "RJ")
+        e1, e2 = st.columns(2)
+        n_items = e1.number_input("Items in the order", min_value=1, key=keep("ql_items", 1))
+        n_sellers = e2.number_input("Sellers in the order", min_value=1, key=keep("ql_sellers", 1))
+        charged = st.number_input("Freight charged (R$, optional: leave 0 to skip the check)", min_value=0.0,
+                                  key=keep("ql_charged", 0.0))
+    remember()
+    payload =dict(category=cat, price=price, weight_kg=weight_g / 1000, volume_cm3=length * width * height,
                    n_items=int(n_items), n_sellers=int(n_sellers), **route_payload(s_zip, s_state, c_zip, c_state))
     if charged > 0:
         payload["freight_value"] = charged
-    p = api_post("/freight/predict", payload)
-    if p is None:
-        return
-    show_notes(p)
-    x = p["inputs"]
-    st.markdown(f"**{cat}**, {x['weight_kg']:,.2f} kg, {x['volume_cm3']:,.0f} cm³, {x['seller_state']} → "
-                f"{x['customer_state']} ({x['distance_km']:,.0f} km)")
-    c = st.columns(3)
-    c[0].metric("Fair freight", money(p["fair_freight"]))
-    c[1].metric("Quote range (R$)", f"{p['quote_low']:,.0f} – {p['quote_high']:,.0f}",
-                help=f"Fair freight ± the average test-set error for items priced R$ {p['price_band']}")
-    c[2].metric("Simple tariff", money(p["tariff"]))
-    if p["check"]:
-        r = p["check"]["rules"][rule]
-        verdict(charged, p["fair_freight"], p["fair_freight_ridge"], dict(band=p["price_band"], mae=p["band_mae"]),
-                r["forest"], r["ridge"])
-        other = "band" if rule == "overall" else "overall"
-        st.caption(f"Under the other rule ({RULES[other]}): "
-                   f"{p['check']['rules'][other]['verdict'].replace('_', ' ')}.")
-    st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms. "
-               f"For a listing the model has never seen, the average error is {md_money(NB['p1_unseen_mae'])} "
-               f"({NB['p1_unseen_pct']}% of their mean freight; Phase 3 notebook, Section 6).")
+    with b:
+        p = api_post("/freight/predict", payload)
+        if p is None:
+            return
+        show_notes(p)
+        x = p["inputs"]
+        st.markdown(f"**{cat}**, {x['weight_kg']:,.2f} kg, {x['volume_cm3']:,.0f} cm³, {x['seller_state']} → "
+                    f"{x['customer_state']} ({x['distance_km']:,.0f} km)")
+        c = st.columns(3)
+        c[0].metric("Fair freight", money(p["fair_freight"]))
+        c[1].metric("Quote range (R$)", f"{p['quote_low']:,.0f} – {p['quote_high']:,.0f}",
+                    help=f"Fair freight ± the average test-set error for items priced R$ {p['price_band']}")
+        c[2].metric("Simple tariff", money(p["tariff"]))
+        if p["check"]:
+            r = p["check"]["rules"][rule]
+            verdict(charged, p["fair_freight"], p["fair_freight_ridge"],
+                    dict(band=p["price_band"], mae=p["band_mae"]), r["forest"], r["ridge"], narrow=True)
+            other = "band" if rule == "overall" else "overall"
+            st.caption(f"Under the other rule ({RULES[other]}): "
+                       f"{p['check']['rules'][other]['verdict'].replace('_', ' ')}.")
+        else:
+            st.info("Enter the freight charged (bottom left) to check it against the fair freight.")
+        st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms. "
+                   f"For a listing the model has never seen, the average error is {md_money(NB['p1_unseen_mae'])} "
+                   f"({NB['p1_unseen_pct']}% of their mean freight; Phase 3 notebook, Section 6).")
+    freight_curves(p, charged or None)
+    why_price(cat, x["seller_state"], x["customer_state"], x["chargeable_kg"], x["distance_km"], x["same_state"],
+              p["fair_freight"], p["fair_freight_ridge"], charged or None)
 
 
 # ------------------------------------------------------------------ Analyst: tariff review
@@ -928,26 +1346,54 @@ def queue_page():
         f"2. Work down the list. Each order has a **suggested follow-up** from its biggest risk driver: a short "
         f"promise, a risky lane or a large or multi-seller order. Keep them cheap: only about one checked order in "
         f"{DAILY_YIELD:.0f} is really late.\n"
-        f"3. Pick an order to see why it is on the list and what promise would have kept it off (the app asks the "
-        f"model API for the order's risk under every promise from 3 to 60 days).\n"
-        f"4. Download the list for the team, or switch on **Reveal what happened** to see the real outcomes.\n\n"
+        f"3. Narrow the list by customer state or follow-up type (the **Map by state** page opens it for one state). "
+        f"The list itself is always the riskiest share of the *whole* day.\n"
+        f"4. Click an order to see why it is on the list and what promise would have kept it off (the app asks the "
+        f"model API for the order's risk under every promise from 3 to 60 days). Mark it **contacted** when the "
+        f"follow-up is done: the mark shows in the list and can be downloaded, for this browser session only.\n"
+        f"5. Download the list for the team, or switch on **Reveal what happened** to see the real outcomes.\n\n"
         f"The scores, drivers and follow-ups of the test window come from the model API's batch run.")
     d = heldout_orders_scored()
     days = d.day.drop_duplicates().sort_values()
     c = st.columns([1, 1, 1])
     default = days[d.groupby("day").size().reindex(days).values >= 150].iloc[0]
-    day = c[0].date_input("Orders placed on", value=default.date(), min_value=days.min().date(),
-                          max_value=days.max().date())
+    day = c[0].date_input("Orders placed on", min_value=days.min().date(), max_value=days.max().date(),
+                          key=keep("q_day", default.date()))
     share = c[1].select_slider("Review capacity (share of the day's orders)", [0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
-                               value=P2["share"], format_func=lambda v: f"{v:.0%}")
-    reveal = c[2].toggle("Reveal what happened", value=False)
+                               format_func=lambda v: f"{v:.0%}", key=keep("q_share", P2["share"]))
+    reveal = c[2].toggle("Reveal what happened", key=keep("q_reveal", False))
+    follow_ups = list(dict.fromkeys(ACTIONS.values()))
+    with st.container(border=True):
+        c = st.columns([2, 2.6, 1.6, 0.8], vertical_alignment="bottom")
+        states = c[0].multiselect("Customer state", STATES, key=keep("q_cstate", []), placeholder="all")
+        acts = c[1].multiselect("Suggested follow-up", follow_ups, key=keep("q_action", []), placeholder="all")
+        only = c[2].toggle("Show only the orders to check", key=keep("q_only", True))
+        c[3].button("Clear", on_click=clear_filters, args=({"q_cstate": [], "q_action": []},), width="stretch")
     flags = daily_flags(share)
     y = d.clf_target.values
     precision = (flags & y).sum() / max(flags.sum(), 1)
     mask = (d.day == pd.Timestamp(day)).values
-    today = d[mask].assign(flag=flags[mask]).sort_values("risk", ascending=False)
-    if today.empty:
+    whole = d[mask].assign(flag=flags[mask]).sort_values("risk", ascending=False)
+    if whole.empty:
         st.info("No delivered orders were placed on that day.")
+        return
+    whole["rank"] = np.arange(1, len(whole) + 1)                # rank in the whole day's list
+    line = float(whole.loc[whole.flag == 0, "risk"].max())       # off the list = below the day's riskiest unflagged
+    def keep_rows(t):
+        m = np.ones(len(t), dtype=bool)
+        if states:
+            m &= t.customer_state.isin(states).to_numpy()
+        if acts:
+            m &= t.action.isin(acts).to_numpy()
+        return m
+
+    today = whole[keep_rows(whole)]
+    filters = "; ".join(([f"customers in {', '.join(states)}"] if states else []) +
+                        ([f"follow-up {', '.join(acts)}"] if acts else []))
+    if filters:
+        st.caption(f"Filtered to {len(today):,} of the day's {len(whole):,} orders: {filters}.")
+    if today.empty:
+        st.info("No order of that day matches these filters: clear one of them or pick another day.")
         return
     flagged = today[today.flag == 1]
     k = st.columns(4)
@@ -960,46 +1406,61 @@ def queue_page():
     else:
         k[3].metric("Median promise", f"{today.promised_days.median():.0f} days")
     if flagged.empty:
-        st.warning(f"With {len(today)} orders, a {share:.0%} capacity rounds to nobody: raise the capacity or pick a "
-                   f"busier day.")
+        st.warning(f"No order to check among these {len(today)} orders: a {share:.0%} capacity of the day's "
+                   f"{len(whole)} orders" + (" flags none of them; clear a filter, " if filters else " rounds to nobody; ")
+                   + "raise the capacity or pick a busier day.")
         return
-    show = today.assign(rank=np.arange(1, len(today) + 1), order=today.order_id.str[:8],
-                        placed=today.order_purchase_timestamp.dt.strftime("%H:%M"),
+    marks = st.session_state.get("order_marks", {})
+    show = today.assign(order=today.order_id.str[:8], placed=today.order_purchase_timestamp.dt.strftime("%H:%M"),
                         route=today.seller_state + " → " + today.customer_state,
-                        action=today.action.where(today.flag == 1, ""))
-    cols = ["rank", "action", "order", "placed", "route", "distance_km", "promised_days", "price_total",
+                        action=today.action.where(today.flag == 1, ""),
+                        contacted=today.order_id.map(lambda o: "✓" if o in marks else ""))
+    cols = ["rank", "contacted", "action", "order", "placed", "route", "distance_km", "promised_days", "price_total",
             "freight_total", "risk"]
     if reveal:
         show["outcome"] = np.where(show.clf_target == 1, "late by " + show.days_late.astype(int).astype(str) + " d",
                                    "on time")
         show["review"] = show.low_review.map({1.0: "1–2 stars", 0.0: "3–5 stars"}).fillna("none")
-        cols = cols[:2] + ["outcome", "review"] + cols[2:]
-    only = st.toggle("Show only the orders to check", value=True)
-    st.dataframe((show[show.flag == 1] if only else show)[cols], hide_index=True, width="stretch", height=380,
-                 column_config={
-                     "action": st.column_config.TextColumn("suggested follow-up", width="medium"),
-                     "distance_km": st.column_config.NumberColumn("distance (km)", format="%.0f"),
-                     "promised_days": st.column_config.NumberColumn("promised (days)", format="%.0f"),
-                     "price_total": st.column_config.NumberColumn("order value", format="R$ %.2f"),
-                     "freight_total": st.column_config.NumberColumn("freight", format="R$ %.2f"),
-                     "risk": st.column_config.ProgressColumn("risk score", format="%.3f", min_value=0.0,
-                                                             max_value=float(d.risk.max()))})
-    out = show[show.flag == 1][["rank", "action", "order_id", "seller_id", "order_purchase_timestamp", "seller_state",
-                                "customer_state", "distance_km", "promised_days", "price_total", "freight_total", "risk"]]
+        cols = cols[:3] + ["outcome", "review"] + cols[3:]
+    listed = (show[show.flag == 1] if only else show).reset_index(drop=True)
+    st.caption("👆 Click an order to see why it is on the list and to mark it contacted.")
+    ev = st.dataframe(listed[cols], hide_index=True, width="stretch", height=380, on_select="rerun",
+                      selection_mode="single-row", key=f"sel_order|{day}|{share}|{only}|{filters}",
+                      column_config={
+                          "contacted": st.column_config.TextColumn("contacted", width="small"),
+                          "action": st.column_config.TextColumn("suggested follow-up", width="medium"),
+                          "distance_km": st.column_config.NumberColumn("distance (km)", format="%.0f"),
+                          "promised_days": st.column_config.NumberColumn("promised (days)", format="%.0f"),
+                          "price_total": st.column_config.NumberColumn("order value", format="R$ %.2f"),
+                          "freight_total": st.column_config.NumberColumn("freight", format="R$ %.2f"),
+                          "risk": st.column_config.ProgressColumn("risk score", format="%.3f", min_value=0.0,
+                                                                  max_value=float(d.risk.max()))})
+    out = show[show.flag == 1][["rank", "contacted", "action", "order_id", "seller_id", "order_purchase_timestamp",
+                                "seller_state", "customer_state", "distance_km", "promised_days", "price_total",
+                                "freight_total", "risk"]]
     st.download_button(f"Download the list for {pd.Timestamp(day):%d %b %Y} (CSV)", out.round(3).to_csv(index=False),
                        f"late_risk_queue_{pd.Timestamp(day):%Y-%m-%d}.csv", "text/csv")
+    marks_summary("order_marks", ("order contacted", "orders contacted"), "contacted_orders.csv")
 
     st.subheader("Why is an order on the list?")
-    pick = st.selectbox("Order", show.order[show.flag == 1].tolist(), help="The orders to check, riskiest first")
-    row = today[today.order_id.str[:8] == pick].head(1)
+    sel = [r for r in ev.selection.rows if r < len(listed)]
+    row = listed.iloc[[sel[0]]] if sel else flagged.head(1)          # default: the riskiest order to check
+    r = row.iloc[0]
+    status = "on the list" if r.flag else "not on the list"
+    st.markdown(f"**Order `{r.order_id[:8]}`** · rank {r['rank']} of {len(whole):,} that day ({status}) · "
+                f"{r.seller_state} → {r.customer_state} · promised {r.promised_days:.0f} days · risk score {r.risk:.3f}"
+                + ("" if sel else " · the riskiest order to check: click another in the list"))
+    if reveal:
+        st.caption("What happened: " + (f"late by {int(r.days_late)} days" if r.clf_target else "on time") + "; "
+                   + {1.0: "a 1–2 star review", 0.0: "a 3–5 star review"}.get(r.low_review, "no review") + ".")
     a, b = st.columns(2, gap="large")
     with a:
-        st.plotly_chart(drivers_chart(drivers_of(row), f"What drives order {pick}'s risk"), width="stretch")
-        st.markdown(f"Suggested follow-up: **{row.action.iloc[0]}**.")
+        st.plotly_chart(drivers_chart(drivers_of(row), f"What drives order {r.order_id[:8]}'s risk"), width="stretch")
+        st.markdown(f"Suggested follow-up: **{r.action}**." if r.flag else
+                    "Not on today's list, so no follow-up is due.")
+        mark_order(r)
     with b:
-        # off the list = less risky than the riskiest order the day's list leaves out
-        line = float(today.loc[today.flag == 0, "risk"].max())
-        promise_section(order_payload(row), float(row.risk.iloc[0]), line, "risk",
+        promise_section(order_payload(row), float(r.risk), line, "risk",
                         f"today's review line ({share:.0%} capacity)", "What promise would have kept it off the list?")
 
     if reveal:
@@ -1010,6 +1471,11 @@ def queue_page():
             f"**{caught / y.sum():.1%}** of late orders ({caught} of {y.sum()}); {share:.0%} random checks would "
             f"catch about {share:.0%}. Ranking the whole window at once, as the Phase 2 evaluation did, catches "
             f"{P2['test']['Recall']:.1%} at 10%: late orders cluster on bad days, which a daily list cannot see.")
+        if filters:
+            wm = keep_rows(d)
+            c_f, y_f = int((flags & y)[wm].sum()), int(y[wm].sum())
+            st.markdown(f"For the filtered orders ({filters}), the daily lists caught **{c_f} of {y_f}** late "
+                        f"orders" + (f" ({c_f / y_f:.1%})." if y_f else "."))
         curve = pd.DataFrame({"share": np.arange(0.05, 0.51, 0.05)})
         curve["caught"] = [(daily_flags(round(s, 2)) & y).sum() / y.sum() for s in curve.share]
         fig = go.Figure()
@@ -1034,53 +1500,56 @@ def promise_page():
     st.title("📅 Promise check")
     st.markdown("How risky is a new order, and what delivery promise would keep it off the review list? The promise "
                 "is the strongest signal the Phase 2 analysis found: longer promises make lateness much less likely.")
-    how_to("Describe the order as it looks at checkout and press **Score**. The result places its risk among the "
-           "orders of the test window, shows which inputs push it up or down, and finds the shortest promise that "
-           "keeps it below the review line.")
-    with st.form("order"):
-        a, b = st.columns(2, gap="large")
-        with a:
-            promised = st.number_input("Promised delivery time (days from purchase)", min_value=1.0, value=20.0)
-            value = st.number_input("Order value, all items (R$)", min_value=0.0, value=150.0, step=10.0)
-            freight = st.number_input("Freight charged, all items (R$)", min_value=0.0, value=25.0, step=1.0)
-            e1, e2 = st.columns(2)
-            n_items = e1.number_input("Items", min_value=1, value=1)
-            n_sellers = e2.number_input("Sellers", min_value=1, value=1)
-        with b:
-            s_zip, s_state = place_inputs("os", "Seller")
-            c_zip, c_state = place_inputs("oc", "Customer", "RJ")
-            share = st.select_slider("Review capacity", [0.05, 0.10, 0.15, 0.20, 0.25, 0.30], value=P2["share"],
-                                     format_func=lambda v: f"{v:.0%}", help="The share of orders the team can check")
-        go_ = st.form_submit_button("Score", type="primary")
-    if not go_:
-        return
-    payload = dict(promised_days=promised, price_total=value, freight_total=freight, n_items=int(n_items),
-                   n_sellers=int(n_sellers), **route_payload(s_zip, s_state, c_zip, c_state))
-    p = api_post("/late/predict", payload, params={"share": share})
-    if p is None:
-        return
-    show_notes(p)
-    x = p["inputs"]
-    st.markdown(f"**{x['seller_state']} → {x['customer_state']}**, {x['distance_km']:,.0f} km, promised "
-                f"{promised:.0f} days")
-    c = st.columns(3)
-    c[0].metric("Risk score", f"{p['risk']:.3f}")
-    c[1].metric("Risk percentile", f"{p['percentile']:.0f}th", help="Among the orders of the test window")
-    c[2].metric("Review line", f"{100 * (1 - share):.0f}th", help=f"The riskiest {share:.0%} of orders are checked")
-    if p["on_review_list"]:
-        st.error(f"🔎 **On the review list:** it would be in the riskiest {share:.0%} of orders. Suggested follow-up: "
-                 f"**{p['suggested_follow_up']}**.")
-    else:
-        st.success(f"✅ **Below the review line** for a {share:.0%} capacity.")
-    a, b = st.columns(2, gap="large")
+    how_to("Describe the order as it looks at checkout on the left: the result on the right updates as you change an "
+           "input. Drag the **promise** slider to move the order along its risk curve; the curve itself is asked for "
+           "once per order (the order under every promise from 3 to 60 days), and each answer is remembered. The "
+           "result places the order's risk among the orders of the test window, finds the shortest promise that "
+           "keeps it below the review line, and shows which inputs push the risk up or down.")
+    promise_tool()
+
+
+@st.fragment
+def promise_tool():
+    """The order's inputs on the left and its risk on the right, updated as the inputs change (a fragment, so only
+    this part reruns). Moving the promise asks for one /late/predict; the promise curve is fetched once per order."""
+    a, b = st.columns([2, 3], gap="large")
     with a:
-        base = {k: x[k] for k in ("promised_days", "price_total", "freight_total", "distance_km", "n_items",
-                                  "n_sellers", "seller_state", "customer_state")}
-        promise_section(base, p["percentile"], 100 * (1 - share), "pct", f"review line (riskiest {share:.0%})",
-                        "Risk for every promise")
+        promised = st.slider("Promised delivery time (days from purchase)", 3, 60, key=keep("pc_promise", 20),
+                             help="Move it to see the order's risk under another promise")
+        value = st.number_input("Order value, all items (R$)", min_value=0.0, step=10.0, key=keep("pc_value", 150.0))
+        freight = st.number_input("Freight charged, all items (R$)", min_value=0.0, step=1.0,
+                                  key=keep("pc_freight", 25.0))
+        e1, e2 = st.columns(2)
+        n_items = e1.number_input("Items", min_value=1, key=keep("pc_items", 1))
+        n_sellers = e2.number_input("Sellers", min_value=1, key=keep("pc_sellers", 1))
+        s_zip, s_state = place_inputs("pc_s", "Seller")
+        c_zip, c_state = place_inputs("pc_c", "Customer", "RJ")
+        share = st.select_slider("Review capacity", [0.05, 0.10, 0.15, 0.20, 0.25, 0.30], format_func=lambda v: f"{v:.0%}",
+                                 key=keep("pc_share", P2["share"]), help="The share of orders the team can check")
+    remember()
+    order =dict(promised_days=float(promised), price_total=value, freight_total=freight, n_items=int(n_items),
+                 n_sellers=int(n_sellers), **route_payload(s_zip, s_state, c_zip, c_state))
     with b:
+        p = api_post("/late/predict", order, params={"share": share})
+        if p is None:
+            return
+        show_notes(p)
+        x = p["inputs"]
+        st.markdown(f"**{x['seller_state']} → {x['customer_state']}**, {x['distance_km']:,.0f} km, promised "
+                    f"{promised} days")
+        c = st.columns(3)
+        c[0].metric("Risk score", f"{p['risk']:.3f}")
+        c[1].metric("Risk percentile", f"{p['percentile']:.0f}th", help="Among the orders of the test window")
+        c[2].metric("Review line", f"{100 * (1 - share):.0f}th", help=f"The riskiest {share:.0%} of orders are checked")
+        if p["on_review_list"]:
+            st.error(f"🔎 **On the review list:** it would be in the riskiest {share:.0%} of orders. Suggested "
+                     f"follow-up: **{p['suggested_follow_up']}**.")
+        else:
+            st.success(f"✅ **Below the review line** for a {share:.0%} capacity.")
+        promise_section(order, p["percentile"], 100 * (1 - share), "pct", f"review line (riskiest {share:.0%})",
+                        "Risk for every promise (the dot is this order)")
         st.plotly_chart(drivers_chart(pd.Series(p["drivers"]), "What drives this order's risk"), width="stretch")
-    st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms.")
+        st.caption(f"API request `{p['request_id']}`, answered in {p['latency_ms']:.0f} ms.")
 
 
 # ------------------------------------------------------------------ Operations: monitoring
@@ -1140,6 +1609,136 @@ def monitor_page():
                  column_config={"Late rate": st.column_config.NumberColumn(format="percent")})
     st.markdown("**Action:** re-train monthly with forward validation; after any change to the promise rules, check "
                 "lift and the catch rate on the newest orders before relying on the ranking.")
+
+
+# ------------------------------------------------------------------ Both teams: map by state
+MAP_VIEWS = {"seller": "Unusual freight, by seller state", "customer": "Unusual freight, by customer state",
+             "late": "Late orders, by customer state", "listed": "Orders on the daily list, by customer state"}
+MAP_MIN = 30                                    # fewer items or orders than this: the state is greyed out
+MAP_SCALE = [[0, "#e8f0fb"], [0.35, "#9cc0ec"], [0.7, BLUE], [1, DIV_LOW]]
+
+
+@st.cache_data(show_spinner=False)
+def brazil_geojson():
+    """The 27 states, simplified; each feature's id is its two-letter code."""
+    return json.loads((HERE / "data" / "brazil_states.geojson").read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner=False)
+def state_table(view, rule):
+    """One row per state: the count, the share shown on the map and the summary figures."""
+    if view in ("seller", "customer"):
+        d = heldout_items_scored(rule)
+        g = (d.assign(excess_u=np.where(d.unusual, d.excess, 0.0))
+             .groupby(f"{view}_state").agg(n=("unusual", "size"), hits=("unusual", "sum"), both=("both", "sum"),
+                                           excess=("excess_u", "sum"), freight=("freight_value", "sum")))
+        g["value"] = g.hits / g.n
+        national = float(d.unusual.mean())
+    else:
+        d = heldout_orders_scored()
+        flags = daily_flags(P2["share"])
+        g = (d.assign(listed=flags, caught=flags & d.clf_target.values)
+             .groupby("customer_state").agg(n=("clf_target", "size"), late=("clf_target", "sum"),
+                                            listed=("listed", "sum"), caught=("caught", "sum")))
+        g["value"] = (g.late if view == "late" else g.listed) / g.n
+        national = float(d.clf_target.mean() if view == "late" else flags.mean())
+    return g.reindex(STATES), national
+
+
+def open_filtered(page, **state):
+    """Open the audit or the queue filtered to one state (the filters are session state, see KEEP)."""
+    st.session_state.update(state)
+    st.switch_page(page)
+
+
+def map_page():
+    st.title("🗺️ Map by state")
+    st.markdown("Where do unusual freight charges and late orders concentrate? Each state is coloured by the share of "
+                "its held-out items or orders; click a state for its figures and to open the freight audit or the "
+                "risk queue filtered to it.")
+    how_to(f"1. Pick what to map. *Unusual freight* uses the analyst's rule (top of the page) and either the seller's "
+           f"or the customer's state; *late orders* shows what happened in the test window; *orders on the daily "
+           f"list* shows the share the daily {P2['share']:.0%} list would have checked.\n"
+           f"2. Click a state (or pick it from the list beside the map) for its figures.\n"
+           f"3. **Open the freight audit** or **Open the risk queue** carries the state over as a filter; clear it "
+           f"there with **Clear**.\n\n"
+           f"States with fewer than {MAP_MIN} items or orders are grey: their shares are too noisy to compare.")
+    keys = list(MAP_VIEWS)
+    view = st.radio("Show", keys, format_func=MAP_VIEWS.get, horizontal=True, key=keep("map_view", "seller"))
+    freight = view in ("seller", "customer")
+    rule = rule_picker() if freight else st.session_state.get("f_rule", "overall")
+    g, national = state_table(view, rule)
+    ok = g[g.n >= MAP_MIN]
+    geo = brazil_geojson()
+    noun = "items" if freight else "orders"
+    label = {"seller": "unusual", "customer": "unusual", "late": "late", "listed": "on the daily list"}[view]
+    # the state shown: a new click on the map picks it (read before the map is drawn, so it can be outlined), and the
+    # list beside the map can pick another without the earlier click overriding it
+    chart_key = f"sel_map|{view}|{rule}"
+    points = (st.session_state.get(chart_key) or {}).get("selection", {}).get("points", [])
+    clicked = [p["location"] for p in points if p.get("location")]
+    if clicked and clicked[0] != st.session_state.get("map_click"):
+        st.session_state.map_state = clicked[0]
+    st.session_state.map_click = clicked[0] if clicked else None
+    pick = st.session_state[keep("map_state", "SP")]
+    plain = dict(marker=dict(opacity=1))                        # no fading of the states not clicked
+    fig = go.Figure()
+    fig.add_choropleth(geojson=geo, locations=STATES, z=[0] * len(STATES), colorscale=[[0, GRID], [1, GRID]],
+                       showscale=False, marker_line=dict(color="white", width=1), customdata=g.n.fillna(0).values,
+                       selected=plain, unselected=plain,
+                       hovertemplate=f"%{{location}}: %{{customdata:,.0f}} {noun} (too few to compare)<extra></extra>")
+    fig.add_choropleth(geojson=geo, locations=ok.index, z=ok.value.values, colorscale=MAP_SCALE, zmin=0,
+                       zmax=float(ok.value.max()), marker_line=dict(color="white", width=1), customdata=ok.n.values,
+                       colorbar=dict(title="", tickformat=".0%", thickness=12, len=0.7), selected=plain,
+                       unselected=plain,
+                       hovertemplate=f"%{{location}}: %{{z:.1%}} {label} of %{{customdata:,.0f}} {noun}<extra></extra>")
+    fig.add_choropleth(geojson=geo, locations=[pick], z=[0], colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+                       showscale=False, marker_line=dict(color=INK, width=2.5), hoverinfo="skip")
+    fig.update_geos(fitbounds="locations", visible=False, projection_type="mercator", bgcolor="rgba(0,0,0,0)")
+    a, b = st.columns([3, 2], gap="large")
+    with a:
+        st.plotly_chart(layout(fig, h=560, title=f"{MAP_VIEWS[view]} (all states {national:.1%})")
+                        .update_layout(dragmode=False), on_select="rerun", selection_mode="points", key=chart_key,
+                        config={"scrollZoom": False, "displayModeBar": False})
+    with b:
+        st.selectbox("State", STATES, key="map_state", help="Or click it on the map")
+        r = g.loc[pick]
+        n = 0 if pd.isna(r.n) else int(r.n)
+        with st.container(border=True):
+            st.markdown(f"#### {next(f['properties']['name'] for f in geo['features'] if f['id'] == pick)} ({pick})")
+            if n == 0:
+                st.markdown(f"No held-out {noun} for this state.")
+            elif freight:
+                k = st.columns(2)
+                k[0].metric("Items", f"{n:,}")
+                k[1].metric("Unusual", f"{int(r.hits):,}", f"{r.value:.1%} against {national:.1%}", delta_color="off")
+                k = st.columns(2)
+                k[0].metric("Flagged by both models", f"{int(r.both):,}")
+                k[1].metric("Excess on unusual items", money(r.excess, 0),
+                            f"{r.excess / r.freight:.1%} of the freight" if r.freight else None, delta_color="off")
+            else:
+                k = st.columns(2)
+                k[0].metric("Orders", f"{n:,}")
+                k[1].metric("Late", f"{int(r.late):,}", f"{r.late / n:.1%} against "
+                            f"{heldout_orders_scored().clf_target.mean():.1%}", delta_color="off")
+                k = st.columns(2)
+                k[0].metric(f"On the daily {P2['share']:.0%} list", f"{int(r.listed):,}",
+                            f"{r.listed / n:.1%} of its orders", delta_color="off")
+                k[1].metric("Late orders caught", f"{int(r.caught):,} of {int(r.late):,}")
+            if 0 < n < MAP_MIN:
+                st.caption(f"Fewer than {MAP_MIN} {noun}: the share is too noisy to compare.")
+            side = "seller" if view == "seller" else "customer"
+            if st.button(f"Open the freight audit for {side}s in {pick}", icon="🔍", width="stretch"):
+                open_filtered(PAGE_AUDIT, f_cat=[], f_band=[], f_both=False,
+                              f_sstate=[pick] if side == "seller" else [], f_cstate=[pick] if side == "customer" else [])
+            if st.button(f"Open the risk queue for customers in {pick}", icon="⏰", width="stretch"):
+                open_filtered(PAGE_QUEUE, q_cstate=[pick], q_action=[])
+    with st.expander("Show as a table"):
+        t = g.assign(state=g.index).dropna(subset=["n"])
+        st.dataframe(t[["state", "n", "value"]].sort_values("value", ascending=False), hide_index=True,
+                     width="stretch", column_config={
+                         "n": st.column_config.NumberColumn("items" if freight else "orders", format="%d"),
+                         "value": st.column_config.NumberColumn(f"share {label}", format="percent")})
 
 
 # ------------------------------------------------------------------ Model card
@@ -1266,7 +1865,7 @@ def service_page():
         "| GET | `/` | the status in the sidebar |\n"
         "| GET | `/model-info` | this page |\n"
         "| POST | `/freight/predict` | Check a charge, *A new listing* |\n"
-        "| POST | `/freight/batch` | Freight audit uploads; the batch job |\n"
+        "| POST | `/freight/batch` | Freight audit uploads; the freight curves of *A new listing*; the batch job |\n"
         "| POST | `/late/predict` | Promise check |\n"
         "| POST | `/late/batch` | the promise what-if curves; the batch job |\n"
         "| GET | `/logs/summary` | this page |")
@@ -1352,6 +1951,7 @@ def api_status():
 
 # ------------------------------------------------------------------ navigation, grouped by stakeholder
 PAGE_HOME = st.Page(home, title="Home", icon="🏠", default=True)
+PAGE_MAP = st.Page(map_page, title="Map by state", icon="🗺️", url_path="map")
 PAGE_AUDIT = st.Page(audit_page, title="Freight audit", icon="🔍", url_path="audit")
 PAGE_CHECK = st.Page(check_page, title="Check a charge", icon="🧾", url_path="check")
 PAGE_TARIFF = st.Page(tariff_page, title="Tariff review", icon="📐", url_path="tariff")
@@ -1360,10 +1960,14 @@ PAGE_PROMISE = st.Page(promise_page, title="Promise check", icon="📅", url_pat
 PAGE_MONITOR = st.Page(monitor_page, title="Monitoring", icon="📈", url_path="monitor")
 PAGE_CARD = st.Page(model_card, title="Model card", icon="📋", url_path="model-card")
 PAGE_SERVICE = st.Page(service_page, title="Model service", icon="🛰️", url_path="service")
-nav = st.navigation({"": [PAGE_HOME],
+nav = st.navigation({"": [PAGE_HOME, PAGE_MAP],
                      "Pricing and finance analyst": [PAGE_AUDIT, PAGE_CHECK, PAGE_TARIFF],
                      "Operations and customer experience": [PAGE_QUEUE, PAGE_PROMISE, PAGE_MONITOR],
                      "About": [PAGE_CARD, PAGE_SERVICE]})
+if not st.session_state.get("api_pinged"):                  # once per session: wake the API while the user reads
+    st.session_state.api_pinged = True
+    threading.Thread(target=ping_api, daemon=True).start()
+remember()                                                  # filters and form inputs outlive their page (keep())
 api_status()
 st.sidebar.caption("Team 5 · IT5006 · AY2026/27 · Phase 3")
 st.sidebar.caption("Scores held-out Olist records (2016–2018) as if they were new orders.")

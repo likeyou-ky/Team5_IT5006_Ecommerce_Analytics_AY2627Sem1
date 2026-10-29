@@ -15,15 +15,16 @@ on Render, documented in `deployment/api/README.md`), and this app calls it over
 
 | What the app shows | How it gets the scores |
 |---|---|
-| *Check a charge* (a new listing), *Promise check* | one call per form: `POST /freight/predict`, `POST /late/predict` |
+| *Check a charge* (a new listing), *Promise check* | the result updates as the inputs change: `POST /freight/predict`, `POST /late/predict`; each answer is remembered for the session, so a rerun with the same inputs calls nothing |
 | *Freight audit* with an uploaded CSV | `POST /freight/batch`, 2,000 rows per call; rows the API rejects are skipped and listed |
-| the promise what-if curves (*Daily risk queue*, *Promise check*) | `POST /late/batch` with the order under every promise from 3 to 60 days |
-| *Freight audit*, *Check a charge* (held-out item), *Tariff review*, *Daily risk queue*, *Monitoring* | `data/scored_items.csv` and `data/scored_orders.csv`: the scores the API returned for every held-out record in a batch run (`deployment/api/batch_score.py`, which checks them against the build) |
+| the promise what-if curves (*Daily risk queue*, *Promise check*) | `POST /late/batch` with the order under every promise from 3 to 60 days, once per order (the promise slider then moves along the curve) |
+| the freight curves of a new listing (fair freight by weight and by distance) | `POST /freight/batch` with about 60 variants of the listing at the distance the API derived |
+| *Freight audit*, *Check a charge* (held-out item), *Tariff review*, *Daily risk queue*, *Monitoring*, *Map by state*, the similar items of *Why this price?* | `data/scored_items.csv` and `data/scored_orders.csv`: the scores the API returned for every held-out record in a batch run (`deployment/api/batch_score.py`, which checks them against the build) |
 | *Model service* | `GET /`, `GET /model-info`, `GET /logs/summary` |
 
 The API address comes from `st.secrets["API_URL"]`, then the `API_URL` environment variable, and defaults to
 https://team5-olist-api.onrender.com. On Render's free tier the API sleeps after 15 minutes without traffic: the
-app then shows *Waking the API (30–60 s)*, waits and retries. The sidebar shows whether the API is online, and every
+app wakes it in the background as soon as a session starts, shows *Waking the API (30–60 s)* if a result is still needed before it answers, waits and retries. The sidebar shows whether the API is online, and every
 form result shows the API's notes (how it placed the seller and customer) and drift warnings (inputs unlike the
 training data).
 
@@ -39,9 +40,13 @@ Ridge as a second opinion)
 
 | Page | When | Decision it supports |
 |---|---|---|
-| Freight audit | monthly | which sellers to audit (ranked by flag rate, with a minimum number of items) and which items to review (flagged by both models first); download both lists |
-| Check a charge | ad hoc | is one held-out charge fair; the fair freight and quote range for a new listing |
+| Freight audit | monthly | which sellers to audit (ranked by flag rate, with a minimum number of items) and which items to review (flagged by both models first); filters by category, seller or customer state and price; click a seller for their items, or an item for its verdict, why its fair freight is what it is, and to record a verdict; download both lists and the verdicts |
+| Check a charge | ad hoc | is one held-out charge fair; the fair freight and quote range for a new listing, updated as the inputs change, with curves of the fair freight by weight and by distance |
 | Tariff review | quarterly | where a simple published tariff, or what sellers charged, sits above or below the fair freight, by distance and weight |
+
+*Why this price?* (Check a charge, and an item opened in the audit) breaks the simple tariff into its base, weight,
+distance and same-state parts next to the forest and Ridge estimates, and lists up to five similar held-out items
+(same category and customer state, close weight and distance) with what they were charged and their fair freight.
 
 An item is **unusual** when its residual (log scale) is in the top 5% of the test set. Two rules are offered at the
 top of the analyst's pages: **Top 5% overall (evaluated)**, the rule the notebooks evaluate and the headline audit
@@ -52,9 +57,13 @@ do not crowd the review list.
 
 | Page | When | Decision it supports |
 |---|---|---|
-| Daily risk queue | daily | which of the day's orders to follow up, with a suggested low-cost action for each (from its biggest risk driver), the expected yield, a download, and the promise that would have kept the order off the list; *Reveal what happened* shows the outcomes |
-| Promise check | at checkout | the risk of a new order and the shortest promise that keeps it below the review line |
+| Daily risk queue | daily | which of the day's orders to follow up, with a suggested low-cost action for each (from its biggest risk driver), the expected yield, filters by customer state and follow-up, a download, and (click an order) why it is on the list, the promise that would have kept it off and a *contacted* mark; *Reveal what happened* shows the outcomes |
+| Promise check | at checkout | the risk of a new order, updated as the inputs change, and the shortest promise that keeps it below the review line; a promise slider moves the order along its risk curve |
 | Monitoring | weekly | whether a change in the promise rules calls for a model review (weekly promise, late rate and catch rate; monthly lift) |
+
+**Both teams:** *Map by state*, a map of Brazil coloured by the share of unusual charges (by seller or customer state), of late orders or of orders on the daily list (by customer state); click a state for its figures and to open the audit or the queue filtered to it.
+
+**Getting started:** Home has three one-click examples (a suspicious charge, a 12-day order from São Paulo to Manaus, the queue of 18 July 2018), and every page has a *How to use this page* button. Verdicts and *contacted* marks are kept for the browser session only (no database): download them as CSV.
 
 **About:** the *Model card* (training data, validation, test results and limits of every model) and *Model service*
 (the API's status, `/model-info` and the live monitoring totals of `/logs/summary`).
@@ -68,6 +77,7 @@ do not crowd the review list.
 - `data/scored_items.csv`, `data/scored_orders.csv`: the API's scores for them, written by
   `deployment/api/batch_score.py`.
 - `data/facts.json`: every headline number the app shows.
+- `data/brazil_states.geojson`: the 27 state outlines for the map (simplified; each feature's id is the state code).
 - `requirements.txt`: dependencies (no scikit-learn: the app loads no model).
 
 ## Run locally

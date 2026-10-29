@@ -1,7 +1,7 @@
 # Model app (frontend) dependencies. Streamlit Cloud reads this file because it sits next to app.py.
 # The app holds no model files: it calls the model API (deployment/api), so scikit-learn and joblib are not needed.
 # Choose Python 3.12 or 3.13 on Streamlit Cloud.
-streamlit>=1.50
+streamlit>=1.55            # lazy tabs (st.tabs on_change), row and map selections
 plotly>=5.18
 pandas>=2.2
 numpy>=1.26

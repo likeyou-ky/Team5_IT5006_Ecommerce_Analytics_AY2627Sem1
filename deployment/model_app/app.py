@@ -443,11 +443,15 @@ def why_price(cat, s_state, c_state, ckg, km, same, fair, fair_ridge, charged=No
             fig.update_yaxes(title="R$", range=[0, top * 1.2])
             st.plotly_chart(layout(fig, h=330, title="The simple tariff, step by step, against the models",
                                    barmode="overlay", waterfallmode="overlay", bargap=0.35), width="stretch")
-            st.caption(f"The tariff adds a base, a rate per chargeable kg and a rate per 100 km"
-                       f"{', less a discount within a state' if same else ''}: {md_money(total)}. The forest's fair "
-                       f"freight ({md_money(fair)}) also weighs the category, the price, both states and how weight "
-                       f"and distance interact, so it errs less: {md_money(P1['test']['MAE_rs'])} on average against "
+            st.caption(f"The simple tariff is a rate card fitted by least squares to the training items: "
+                       f"{md_money(t['base'])} base + {md_money(t['per_kg'])} per chargeable kg + "
+                       f"{md_money(t['per_100km'])} per 100 km {'−' if t['same_state'] < 0 else '+'} "
+                       f"{md_money(abs(t['same_state']))} within a state, the kind of rule a pricing team could "
+                       f"publish. For this item it adds up to {md_money(total)}. The forest's fair freight "
+                       f"({md_money(fair)}) also weighs the category, the price, both states and how weight and "
+                       f"distance interact, so it errs less: {md_money(P1['test']['MAE_rs'])} on average against "
                        f"{md_money(t['mae'])} for the tariff (Ridge {md_money(P1['ridge_test']['MAE_rs'])}).")
+            st.page_link(PAGE_TARIFF, label="Where the simple tariff over- or under-charges: Tariff review", icon="📐")
     with b:
         sim = similar_items(cat, s_state, c_state, ckg, km, exclude)
         st.markdown(f"**Similar held-out items** ({cat}, to {c_state})")

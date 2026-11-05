@@ -1858,9 +1858,10 @@ def model_card():
                     "route patterns learned in training did not carry over once the promise rules changed.")
         st.markdown(
             "**Limits.** The model ranks, it does not forecast: its scores overstate the late rate of the test window. "
-            "Cross-entropy on the test window is 0.177, slightly worse than 0.167 for a constant guess at the "
-            "training late rate: the model still expects lateness at the training level (average predicted risk "
-            "9.8% against 3.5% actual), so its scores are used only to rank orders. "
+            "Brier score on the test window is 0.041, slightly worse than 0.035 for a constant guess at the "
+            "training late rate (cross-entropy 0.177 against 0.167 tells the same story): the model still expects "
+            "lateness at the training level (average predicted risk 9.8% against 3.5% actual), so its scores are "
+            "used only to rank orders. "
             "Olist cut its promised times sharply from late July 2018, and the short promises to São Paulo customers "
             "account for most missed late orders. The ranking is weakest when promises change: see *Monitoring*.")
     st.divider()

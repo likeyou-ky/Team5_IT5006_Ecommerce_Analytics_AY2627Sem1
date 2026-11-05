@@ -1760,8 +1760,8 @@ P2_FIT = [("Prior (no skill)", 1.00, 1.00, 1.00), ("Plain logistic (selected)", 
 def model_card():
     st.title("📋 Model card")
     st.markdown("What each model was trained on, how it was validated and where it should not be trusted. Test "
-                "results are recomputed by `build_models.py` from the model files the API loads; cross-validation and "
-                "robustness results are quoted from the notebooks (Problem 1: Phase 3; Problem 2: Phase 2).")
+                "results come from the same models the app uses; training and cross-validation results come from "
+                "model development on earlier records only.")
     a, b = st.columns(2, gap="large")
     with a:
         st.subheader("Problem 1 · Fair freight")

@@ -1746,6 +1746,17 @@ def map_page():
 
 
 # ------------------------------------------------------------------ Model card
+# Quoted from the notebooks' outputs (Problem 1: Phase 3 notebook, Section 4 and permutation importance; Problem 2:
+# Phase 2 notebook, results and Section 9), as in the report's Tables 5 and 6.
+P1_FIT = [("Mean predictor (no model)", 7.32, 7.48, 9.61), ("Linear regression", 4.42, 4.59, 6.13),
+          ("Ridge", 4.42, 4.59, 6.12), ("Decision tree", 2.18, 4.16, 5.69),
+          ("Random forest (selected)", 2.53, 3.71, 5.40), ("Stacking (Ridge + forest)", 2.51, 3.71, 5.32)]
+P1_IMPORTANCE = [("distance", 0.104), ("same-state route", 0.075), ("weight", 0.059), ("price", 0.031)]
+P2_FIT = [("Prior (no skill)", 1.00, 1.00, 1.00), ("Plain logistic (selected)", 2.44, 2.01, 2.00),
+          ("L2 logistic", 2.44, 2.03, 1.98), ("Decision tree", 4.83, 1.29, 1.62),
+          ("Random forest", 2.87, 1.88, 1.18), ("Soft vote", 2.58, 2.00, 1.76)]
+
+
 def model_card():
     st.title("📋 Model card")
     st.markdown("What each model was trained on, how it was validated and where it should not be trusted. Test "
@@ -1786,6 +1797,15 @@ def model_card():
             "band": st.column_config.TextColumn("Price (R$)"), "n": st.column_config.NumberColumn("Items"),
             "mae": st.column_config.NumberColumn("MAE", format="R$ %.2f"),
             "mae_pct": st.column_config.NumberColumn("MAE %", format="percent")})
+        st.markdown("**Train, cross-validation and test error.** Training error well below CV means overfitting; "
+                    "the step from CV to test is mostly drift, as freight per kg rose 27% after training:")
+        st.dataframe(pd.DataFrame(P1_FIT, columns=["Model", "Train", "CV", "Test"]), hide_index=True,
+                     width="stretch", column_config={c: st.column_config.NumberColumn(c, format="R$ %.2f")
+                                                     for c in ["Train", "CV", "Test"]})
+        st.markdown("**Most influential inputs** (permutation importance on the test items: the rise in log-scale MAE "
+                    "when an input is shuffled): " + ", ".join(f"{k} {v:.3f}" for k, v in P1_IMPORTANCE) +
+                    ". The same-state flag ranks second even with distance in the model: freight jumps at a state "
+                    "border rather than rising smoothly with kilometres.")
         st.markdown(
             f"**Limits.** Freight per kg rose over time, so the error on later items ({P1['test']['MAE_pct']}% of mean "
             f"freight) misses the 20% target; on a random split, which mixes periods, it would be "
@@ -1824,6 +1844,18 @@ def model_card():
             "late": st.column_config.NumberColumn("Late"),
             "cum_capture": st.column_config.NumberColumn("Caught so far", format="percent"),
             "lift": st.column_config.NumberColumn("Lift", format="%.2f")})
+        st.markdown("**Train, cross-validation and test lift** (PR-AUC ÷ late rate; 1 = random). The trees memorise "
+                    "their training period; plain logistic regression barely moves from CV to test:")
+        st.dataframe(pd.DataFrame(P2_FIT, columns=["Model", "Train", "CV", "Test"]), hide_index=True,
+                     width="stretch", column_config={c: st.column_config.NumberColumn(c, format="%.2f")
+                                                     for c in ["Train", "CV", "Test"]})
+        st.markdown("**Most influential inputs.** The promised delivery time dominates: shuffling it lowers test "
+                    "PR-AUC by 0.041, from 0.070 to below the 3.5% late rate (in the L2 model, one standard "
+                    "deviation longer promise lowers the log-odds of lateness by 0.72). Deliveries to Alagoas (+0.91), "
+                    "Pará (+0.48) and Rio de Janeiro (+0.43) carried higher odds in training. Distance and the "
+                    "same-state flag still move individual orders' scores (see an order's risk drivers on the "
+                    "*Daily risk queue*), but across the test window shuffling them does not weaken the ranking: "
+                    "route patterns learned in training did not carry over once the promise rules changed.")
         st.markdown(
             "**Limits.** The model ranks, it does not forecast: its scores overstate the late rate of the test window. "
             "Olist cut its promised times sharply from late July 2018, and the short promises to São Paulo customers "

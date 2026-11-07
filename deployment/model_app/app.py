@@ -1755,6 +1755,21 @@ P1_IMPORTANCE = [("distance", 0.104), ("same-state route", 0.075), ("weight", 0.
 P2_FIT = [("Prior (no skill)", 1.00, 1.00, 1.00), ("Plain logistic (selected)", 2.44, 2.01, 2.00),
           ("L2 logistic", 2.44, 2.03, 1.98), ("Decision tree", 4.83, 1.29, 1.62),
           ("Random forest", 2.87, 1.88, 1.18), ("Soft vote", 2.58, 2.00, 1.76)]
+# Recall and precision when the riskiest 10% are flagged: train | CV (mean of the 5 validation blocks) | test. CV and
+# test from the Phase 2 notebook (Sections 6-7); train from p2_train_cv_test.py, which rebuilds the same models and
+# reproduces the notebook's train, CV and test lifts.
+P2_RULE = [("Prior (no skill)", 0.098, 0.095, 0.088, 0.075, 0.082, 0.031),
+           ("Plain logistic (selected)", 0.299, 0.243, 0.228, 0.229, 0.212, 0.080),
+           ("L2 logistic", 0.297, 0.246, 0.221, 0.227, 0.215, 0.077),
+           ("Decision tree", 0.470, 0.157, 0.132, 0.360, 0.138, 0.046),
+           ("Random forest", 0.319, 0.231, 0.139, 0.244, 0.201, 0.049),
+           ("Soft vote", 0.306, 0.251, 0.196, 0.235, 0.216, 0.068)]
+
+
+@st.cache_data
+def p2_pr_curves():
+    """PR curves of the selected late model on its training orders, each CV validation block and the test window."""
+    return json.loads((HERE / "data" / "p2_pr_curves.json").read_text(encoding="utf-8"))
 
 
 def model_card():
@@ -1849,6 +1864,39 @@ def model_card():
         st.dataframe(pd.DataFrame(P2_FIT, columns=["Model", "Train", "CV", "Test"]), hide_index=True,
                      width="stretch", column_config={c: st.column_config.NumberColumn(c, format="%.2f")
                                                      for c in ["Train", "CV", "Test"]})
+        st.markdown("**Recall and precision at the 10% review rule** (the riskiest 10% of each set flagged):")
+        rule = pd.DataFrame(P2_RULE, columns=["Model", "r_tr", "r_cv", "r_te", "p_tr", "p_cv", "p_te"])
+        for metric, cols_ in [("Recall", ["r_tr", "r_cv", "r_te"]), ("Precision", ["p_tr", "p_cv", "p_te"])]:
+            st.dataframe(rule[["Model"] + cols_].set_axis(["Model", "Train", "CV", "Test"], axis=1), hide_index=True,
+                         width="stretch", column_config={"Model": st.column_config.TextColumn(metric), **{
+                             c: st.column_config.NumberColumn(c, format="percent") for c in ["Train", "CV", "Test"]}})
+        cur = p2_pr_curves()
+        st.markdown(
+            f"Late orders were rarer in the test window ({cur['test']['late_rate']:.1%}) than in training "
+            f"({cur['train']['late_rate']:.1%}), so precision and PR-AUC fall even when the ranking holds: the selected "
+            f"model's PR-AUC is {cur['train']['pr_auc']:.3f} on its training orders, "
+            f"{np.mean([f['pr_auc'] for f in cur['cv_folds']]):.3f} in CV and {cur['test']['pr_auc']:.3f} on the test "
+            "window, yet its recall barely moves. Dividing PR-AUC by each set's late rate gives the lift above, which "
+            "is why lift is compared across sets.")
+        fig = go.Figure()
+        for j, f in enumerate(cur["cv_folds"], 1):
+            fig.add_trace(go.Scatter(x=f["recall"], y=f["precision"], mode="lines", line=dict(color=GREY, width=1),
+                                     name="CV validation blocks", legendgroup="cv", showlegend=j == 1,
+                                     hovertemplate=f"CV block {j}<br>recall %{{x:.0%}}<br>precision %{{y:.0%}}<extra></extra>"))
+        for key, label, colour in [("train", "Training orders", BLUE), ("test", "Test window", ORANGE)]:
+            c = cur[key]
+            fig.add_trace(go.Scatter(x=c["recall"], y=c["precision"], mode="lines", line=dict(color=colour, width=2.5),
+                                     name=f"{label} (PR-AUC {c['pr_auc']:.3f})",
+                                     hovertemplate=f"{label}<br>recall %{{x:.0%}}<br>precision %{{y:.0%}}<extra></extra>"))
+            fig.add_hline(y=c["late_rate"], line=dict(color=colour, dash="dot", width=1))
+        fig.add_trace(go.Scatter(x=[0.228], y=[0.080], mode="markers", marker=dict(color=ORANGE, size=11, symbol="diamond",
+                                 line=dict(color="white", width=1.5)), name="Test, riskiest 10% flagged",
+                                 hovertemplate="riskiest 10% flagged<br>recall 22.8%<br>precision 8.0%<extra></extra>"))
+        fig.update_xaxes(title="Recall (share of late orders caught)", tickformat=".0%", range=[0, 1])
+        fig.update_yaxes(title="Precision (share of flagged orders that are late)", tickformat=".0%", range=[0, 0.6])
+        st.plotly_chart(layout(fig, h=420, title="Precision-recall curves, selected model"), width="stretch")
+        st.caption("Dotted lines: the late rate of the training orders (blue) and the test window (orange), which is "
+                   "what random checks would achieve. Grey: the five CV validation blocks.")
         st.markdown("**Most influential inputs.** The promised delivery time dominates: shuffling it lowers test "
                     "PR-AUC by 0.041, from 0.070 to below the 3.5% late rate (in the L2 model, one standard "
                     "deviation longer promise lowers the log-odds of lateness by 0.72). Deliveries to Alagoas (+0.91), "

@@ -16,6 +16,7 @@ project-root/
 ├── notebooks/
 │   ├── Team5_Phase1_IT5006_AY2627Sem1.ipynb   consolidated EDA — the Phase 1 deliverable
 │   ├── Team5_Phase2_IT5006_AY2627Sem1.ipynb   modelling and evaluation — the Phase 2 deliverable
+│   ├── Team5_Phase3_IT5006_AY2627Sem1.ipynb   final notebook: both problems, evaluated forward in time — the Phase 3 deliverable
 │   └── draft/individual/                       each member's working notebooks
 ├── src/             reusable modules: features.py, models.py, pipeline.py, plots.py, olist_theme.py
 ├── deployment/
@@ -84,12 +85,14 @@ checkout; precision, recall and F1 are reported for the riskiest 10% of orders (
 To reproduce it, put the CSVs in `data/` (or set `OLIST_DATA_DIR`) and run the notebook top to bottom (about 15
 minutes on 12 cores). It calls the reusable functions in `src/`.
 
-`notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` responds to the Phase 2 feedback. It re-evaluates Problem 1 on a
-**time-ordered split** (train on the earliest 80% of items, test on the latest 20%; feature selection, tuning and model
-choice on 5-fold forward-chaining CV), reports training, CV and test scores side by side, compares models with a
-paired fold-by-fold rule, and lists every candidate of the searches of both problems. On later periods the listing
-and timing features no longer help and are dropped; the final model stays a RandomForest, now trained and tested in
-time order. Problem 2 is unchanged. It runs in about 15 minutes.
+`notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` is the **final notebook** and the Phase 3 deliverable: it holds the
+final results of both problems. Part A re-evaluates Problem 1 on a **time-ordered split** (train on the earliest 80% of
+items, test on the latest 20%; feature selection, tuning and model choice on 5-fold forward-chaining CV), as the Phase 2
+feedback asked. Part B brings Problem 2 together: the time-ordered split with its 30-day embargo, forward selection,
+the full search record, the paired fold-by-fold selection rule, training, CV and test scores (lift, recall, precision
+and precision-recall curves), the missed late orders, feature importance and the four test windows. On later periods
+the listing and timing features no longer help Problem 1 and are dropped; the final models are a RandomForest (Problem
+1) and plain logistic regression (Problem 2). It runs top to bottom in about 15 minutes.
 
 ## Dashboard
 
@@ -125,7 +128,7 @@ The final models are deployed in two parts, following the course's deployment le
 - `deployment/model_app/`: a **Streamlit app that calls the API**, organised around the two stakeholders. It holds
   no model files.
 
-**Live app (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final.
+**Live app:** https://team5-olist-phase3.streamlit.app
 
 - **Logistics-pricing / finance analyst** (Problem 1, RandomForest from the Phase 3 notebook, with Ridge as a
   second opinion): a monthly

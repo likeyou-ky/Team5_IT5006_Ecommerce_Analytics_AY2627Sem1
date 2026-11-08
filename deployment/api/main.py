@@ -3,8 +3,8 @@
 Team 5 Olist model API (IT5006 Phase 3): the model service behind the Streamlit app.
 
 Serves the two final models of the project:
-  Problem 1, fair freight    RandomForest on log(1 + freight) (Phase 3 notebook), with Ridge as a second opinion
-  Problem 2, late delivery   plain LogisticRegression (Phase 2 notebook), a risk ranking for the daily review queue
+  Problem 1, fair freight    RandomForest on log(1 + freight) (final notebook), with Ridge as a second opinion
+  Problem 2, late delivery   plain LogisticRegression (final notebook), a risk ranking for the daily review queue
 
 Endpoints
   GET  /                                  health

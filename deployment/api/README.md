@@ -294,7 +294,7 @@ defaults to the Render service; to use a local API: `API_URL=http://localhost:80
 
 | Setting | Value |
 |---|---|
-| Branch | `Phase3_Test` |
+| Branch | `main` |
 | Root directory | `deployment/api` |
 | Runtime | Python 3 (version from `.python-version`: 3.12.7) |
 | Build command | `pip install -r requirements.txt` |

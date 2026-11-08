@@ -1,12 +1,12 @@
 # deployment/model_app/
 
 The Phase 3 model app: a Streamlit app that turns the final models into decision tools for the two stakeholders of
-our problems: Problem 1 from `notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` (re-evaluated on a time-ordered split
-after the Phase 2 feedback) and Problem 2 from `notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb`. The Phase 1 EDA
+our problems, both from the final notebook `notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` (Part A: Problem 1;
+Part B: Problem 2). The Phase 1 EDA
 dashboard (`deployment/app.py`) is a separate app and is unchanged.
 
-**Live (testing):** https://team5-olist-phase3-test1.streamlit.app; it moves to https://team5-olist-phase3.streamlit.app once the design is final. Streamlit Cloud builds it from
-branch `Phase3_Test`, main file `deployment/model_app/app.py`.
+**Live:** https://team5-olist-phase3.streamlit.app. Streamlit Cloud builds it from branch `main`, main file
+`deployment/model_app/app.py`.
 
 ## Architecture: an API and its frontend
 

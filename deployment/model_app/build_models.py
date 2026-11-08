@@ -9,7 +9,7 @@ Both models are trained with the notebooks' own code in src/ on the notebooks' o
   log1p(freight), trained on the earliest 80% of items (purchased up to 24 May 2018), with the feature groups,
   settings and model chosen by forward-chaining CV. The test items are the latest 20%. The tuned Ridge model is the
   audit's second opinion: items flagged by both models come first.
-* Problem 2, late delivery (notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb, Sections 4-8): plain
+* Problem 2, late delivery (notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb, Part B, Sections 10-14): plain
   LogisticRegression on the time-ordered training split (orders up to 26 Apr 2018).
 
 Unusual freight = residual in the top 5% of the test set, either overall (the notebook's rule) or within each price
@@ -83,7 +83,7 @@ def unusual(res, band, cut, rule):
 d = F.find_data_dir()
 print("Reading raw data from:", d)
 
-# ============================ tables and splits (Phase 3 notebook Section 1; Phase 2 notebook Section 4) ============
+# ============================ tables and splits (final notebook Sections 1 and 10) ============
 items = F.build_item_table(d)
 orders = F.build_order_table(d)
 tr_a, te_a = M.time_holdout(items, embargo_days=0)      # freight is known at checkout: no label delay
@@ -93,7 +93,7 @@ assert tr_a.purchase_ts.max() <= te_a.purchase_ts.min(), "Problem 1: a training 
 assert tr_b.purchase_ts.max() < te_b.purchase_ts.min() - F.EMBARGO_DAYS * M.DAY, "Problem 2: embargo violated"
 
 # Feature sets: Problem 1 = what the forward-chaining feature selection of Phase 3 Section 2 keeps (listing details and
-# purchase timing did not help on later periods); Problem 2 = what the forward selection of Phase 2 Section 5 keeps
+# purchase timing did not help on later periods); Problem 2 = what the forward selection of Section 11 keeps
 fs_a = F.FEATURE_SETS["3 + price & basket"]
 fs_b = P.merge_sets(P.merge_sets(F.LATE_BASE, F.LATE_GROUPS["route (distance, states)"]),
                     F.LATE_GROUPS["order value & freight"])
@@ -216,8 +216,8 @@ facts = {
                    for c in ["promised_days", "price_total", "freight_total", "distance_km"]},
     },
     "state_centroids": {s: [row.lat, row.lng] for s, row in state_cen.iterrows()},
-    # Notebook results that need more than the deployed models; shown as cited. Problem 1: Phase 3 notebook;
-    # Problem 2: Phase 2 notebook (main, 84ba8ab)
+    # Notebook results that need more than the deployed models; shown as cited, from the final notebook
+    # (Problem 1: Part A; Problem 2: Part B)
     "notebook": {
         "p1_cv_mae": 3.71, "p1_cv_mae_sd": 0.88, "p1_ridge_test_mae": 6.12, "p1_tree_test_mae": 5.69,
         "p1_stack_test_mae": 5.32, "p1_unseen_mae": 5.76, "p1_unseen_pct": 25.6,

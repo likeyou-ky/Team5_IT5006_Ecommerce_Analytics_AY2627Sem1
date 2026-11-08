@@ -2,8 +2,8 @@
 """
 Olist logistics assistant: the Phase 3 model app (Team 5, IT5006).
 
-Deploys the two final models, one tool set per stakeholder: Problem 1 from notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb
-(re-evaluated on a time-ordered split), Problem 2 from notebooks/Team5_Phase2_IT5006_AY2627Sem1.ipynb.
+Deploys the two final models, one tool set per stakeholder, both from the final notebook
+notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb (Part A: Problem 1; Part B: Problem 2).
 
   Logistics-pricing / finance analyst (Problem 1, fair freight; RandomForest on a time-ordered split, with Ridge as
   the audit's second opinion)

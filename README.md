@@ -6,6 +6,12 @@ a **regression** task (what freight *should* an item be charged, from weight, si
 
 **Repository:** https://github.com/likeyou-ky/Team5_IT5006_Ecommerce_Analytics_AY2627Sem1
 
+**Final notebook (Phase 3):** `notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb`
+
+**Live model app (Phase 3):** https://team5-olist-phase3.streamlit.app
+
+**Model API (Phase 3):** https://team5-olist-api.onrender.com/docs
+
 **Live EDA dashboard (Phase 1):** https://team5-olist-eda-phase1.streamlit.app/
 
 ## Repository structure
@@ -84,6 +90,8 @@ checkout; precision, recall and F1 are reported for the riskiest 10% of orders (
 
 To reproduce it, put the CSVs in `data/` (or set `OLIST_DATA_DIR`) and run the notebook top to bottom (about 15
 minutes on 12 cores). It calls the reusable functions in `src/`.
+
+## Phase 3 — final notebook
 
 `notebooks/Team5_Phase3_IT5006_AY2627Sem1.ipynb` is the **final notebook** and the Phase 3 deliverable: it holds the
 final results of both problems. Part A re-evaluates Problem 1 on a **time-ordered split** (train on the earliest 80% of

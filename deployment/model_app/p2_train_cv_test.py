@@ -1,8 +1,8 @@
 """Problem 2: train / CV / test precision, recall, PR-AUC and PR curves for the Model card page.
 
-Rebuilds the late-delivery models exactly as the Phase 2 notebook does (same split, feature set, tuned settings and
+Rebuilds the late-delivery models exactly as the final notebook does (same split, feature set, tuned settings and
 pipeline functions) and writes data/p2_train_cv_test.csv and data/p2_pr_curves.json. Stops if any model's train, CV or
-test lift differs from the notebook's printed values (Phase 2 notebook, Section 7).
+test lift differs from the notebook's printed values (final notebook, Section 14).
 Run: OLIST_DATA_DIR=/path/to/Olist_CSV python deployment/model_app/p2_train_cv_test.py"""
 import json, os, sys
 import numpy as np, pandas as pd

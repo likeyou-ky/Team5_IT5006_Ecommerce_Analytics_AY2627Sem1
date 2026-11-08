@@ -1565,7 +1565,7 @@ def monitor_page():
         "by week: the promise, the late rate and how many late orders the daily list caught.")
     how_to("Read the three panels together. A sharp move in the median promise is the warning sign; the weeks it "
            "flags (⚠) are when the team should re-check the model on recent orders and retrain if the catch rate "
-           "falls. Monthly model skill from the Phase 2 notebook is in the table below.")
+           "falls. The model's skill month by month is in the table below.")
     d = heldout_orders_scored()
     flags = daily_flags(P2["share"])
     wk = (d.assign(caught=flags & d.clf_target.values, week=d.order_purchase_timestamp.dt.to_period("W").dt.start_time)
@@ -1606,7 +1606,7 @@ def monitor_page():
         st.markdown(f"**⚠ Weeks to review:** {', '.join(f'{w.day} {w:%b}' for w in al.index)}. The median promise fell from "
                     f"{wk.promise.iloc[0]:.0f} to {wk.promise.iloc[-1]:.0f} days across the window while the late rate "
                     f"rose to {wk.late_rate.max():.1%}; the ranking learned on longer promises loses its edge.")
-    st.subheader("Model skill by month (Phase 2 notebook, Section 10)")
+    st.subheader("Model skill by month")
     bm = pd.DataFrame(P2["by_month"])
     st.dataframe(bm.rename(columns={"month": "Month", "orders": "Orders", "late_rate": "Late rate", "lift": "Lift",
                                     "roc_auc": "ROC-AUC"}), hide_index=True, width="stretch",
@@ -1746,8 +1746,8 @@ def map_page():
 
 
 # ------------------------------------------------------------------ Model card
-# Quoted from the notebooks' outputs (Problem 1: Phase 3 notebook, Section 4 and permutation importance; Problem 2:
-# Phase 2 notebook, results and Section 9), as in the report's Tables 5 and 6.
+# Quoted from the final (Phase 3) notebook's outputs (Problem 1: Sections 5 and 7; Problem 2: Sections 14 and 16), as in
+# the report's Tables 5, 6 and E5.
 P1_FIT = [("Mean predictor (no model)", 7.32, 7.48, 9.61), ("Linear regression", 4.42, 4.59, 6.13),
           ("Ridge", 4.42, 4.59, 6.12), ("Decision tree", 2.18, 4.16, 5.69),
           ("Random forest (selected)", 2.53, 3.71, 5.40), ("Stacking (Ridge + forest)", 2.51, 3.71, 5.32)]
@@ -1755,13 +1755,12 @@ P1_IMPORTANCE = [("distance", 0.104), ("same-state route", 0.075), ("weight", 0.
 P2_FIT = [("Prior (no skill)", 1.00, 1.00, 1.00), ("Plain logistic (selected)", 2.44, 2.01, 2.00),
           ("L2 logistic", 2.44, 2.03, 1.98), ("Decision tree", 4.83, 1.29, 1.62),
           ("Random forest", 2.87, 1.88, 1.18), ("Soft vote", 2.58, 2.00, 1.76)]
-# Recall and precision when the riskiest 10% are flagged: train | CV (mean of the 5 validation blocks) | test. CV and
-# test from the Phase 2 notebook (Sections 6-7); train from p2_train_cv_test.py, which rebuilds the same models and
-# reproduces the notebook's train, CV and test lifts.
+# Recall and precision when the riskiest 10% are flagged: train | CV (mean of the 5 validation blocks) | test, from the
+# final notebook, Section 14 (p2_train_cv_test.py reproduces them and writes the PR curves).
 P2_RULE = [("Prior (no skill)", 0.098, 0.095, 0.088, 0.075, 0.082, 0.031),
            ("Plain logistic (selected)", 0.299, 0.243, 0.228, 0.229, 0.212, 0.080),
            ("L2 logistic", 0.297, 0.246, 0.221, 0.227, 0.215, 0.077),
-           ("Decision tree", 0.470, 0.157, 0.132, 0.360, 0.138, 0.046),
+           ("Decision tree", 0.470, 0.157, 0.129, 0.360, 0.138, 0.045),
            ("Random forest", 0.319, 0.231, 0.139, 0.244, 0.201, 0.049),
            ("Soft vote", 0.306, 0.251, 0.196, 0.235, 0.216, 0.068)]
 
